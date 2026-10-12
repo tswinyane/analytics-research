@@ -1,0 +1,14 @@
+.git
+.idea
+.agents
+.codex
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+frontend/node_modules
+frontend/dist
+backend.log
+nohup.out
+logs/*.log
+package-lock.json

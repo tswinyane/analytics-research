@@ -1,0 +1,42 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / frontend
+/package-lock.json
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Local IDE / Codex workspace state
+.idea/
+.agents/
+.codex/
+
+# Runtime logs and generated outputs
+logs/
+outputs/
+*.log
+nohup.out
+backend.log
+
+# Database dumps and local backups
+*.sql
+*.sqlite
+*.sqlite3
+backups/
+docker-files/
+
+# OS noise
+.DS_Store
+Thumbs.db
