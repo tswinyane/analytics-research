@@ -527,7 +527,12 @@ class IngestionPipeline:
                     "researcher_work_links": 0,
                 }
             )
-            by_doi = self._openalex_by_doi(session, connector, article_only=article_only)
+            by_doi = self._openalex_by_doi(
+                session,
+                connector,
+                limit=settings.openalex_doi_enrichment_limit,
+                article_only=article_only,
+            )
             by_title = self._openalex_by_title(
                 session,
                 connector,
@@ -596,9 +601,18 @@ class IngestionPipeline:
             session.commit()
         return counters
 
-    def _openalex_by_doi(self, session, connector: OpenAlexConnector, *, article_only: bool) -> dict[str, int]:
+    def _openalex_by_doi(
+        self,
+        session,
+        connector: OpenAlexConnector,
+        *,
+        limit: int,
+        article_only: bool,
+    ) -> dict[str, int]:
         """Optional: batch-look-up DOIs of ORCID/DSpace works that still lack OpenAlex data."""
         counters = {"works_checked": 0, "records_fetched": 0, "records_upserted": 0, "researcher_work_links": 0}
+        if limit <= 0:
+            return counters
         openalex_work_ids = select(SourceRecord.work_id).where(SourceRecord.source_name == "openalex")
         dois = list(
             session.scalars(
@@ -608,6 +622,7 @@ class IngestionPipeline:
                 .where(Work.doi.is_not(None))
                 .where(Work.id.not_in(openalex_work_ids))
                 .distinct()
+                .limit(limit)
             ).all()
         )
         logger.info("OpenAlex: %s works with DOIs still need enrichment", len(dois))

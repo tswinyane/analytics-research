@@ -179,6 +179,7 @@ OPENALEX_PER_PAGE=200
 OPENALEX_REQUEST_DELAY_SECONDS=0.05
 OPENALEX_MAX_ATTEMPTS=12
 OPENALEX_RETRY_AFTER_MAX_SECONDS=60
+OPENALEX_DOI_ENRICHMENT_LIMIT=0
 OPENALEX_TITLE_ENRICHMENT_LIMIT=0
 OPENALEX_RESEARCHER_EXPANSION=false
 ORCID_RESEARCHERS_PER_RUN=500
@@ -186,7 +187,8 @@ ORCID_RESEARCHERS_PER_RUN=500
 
 For the fastest initial load, leave `OPENALEX_RESEARCHER_EXPANSION=false`.
 The institution cursor harvest pulls the bulk OpenAlex records; per-researcher
-OpenAlex expansion can be enabled later for smaller catch-up runs.
+OpenAlex expansion and DOI/title enrichment can be enabled later for smaller
+catch-up runs.
 
 ## Local backend run without Docker
 

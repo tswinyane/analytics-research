@@ -34,6 +34,7 @@ class Settings:
     openalex_max_attempts: int = int(os.getenv("OPENALEX_MAX_ATTEMPTS", "8"))
     openalex_retry_after_max_seconds: int = int(os.getenv("OPENALEX_RETRY_AFTER_MAX_SECONDS", "60"))
     openalex_dspace_enrichment_limit: int = int(os.getenv("OPENALEX_DSPACE_ENRICHMENT_LIMIT", "0"))
+    openalex_doi_enrichment_limit: int = int(os.getenv("OPENALEX_DOI_ENRICHMENT_LIMIT", "0"))
     # Max ORCID/DSpace works without a DOI match to look up individually in OpenAlex by
     # title per run (slow, one request each). 0 skips the title-search phase.
     openalex_title_enrichment_limit: int = int(
