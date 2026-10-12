@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import AuthorAlias, HarvestRun, SourceRecord, Work
+from app.models import AuthorAlias, HarvestRun, Researcher, ResearcherWork, SourceRecord, Work
 from app.services.faculties import (
     DEPARTMENT_RULES,
     classify_work,
@@ -90,7 +90,9 @@ class AnalyticsService:
         # Bump the version whenever this payload's *computation* changes (not just its shape)
         # to force a rebuild instead of serving stale numbers for up to an hour (the cache TTL)
         # after every fix.
-        self._dashboard_cache_snapshot_version = 27
+        # Bumped from 27 -> 28: OpenAlex-only dashboard rows classify faculty/department
+        # using ORCID-linked researcher affiliations when available.
+        self._dashboard_cache_snapshot_version = 28
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -100,7 +102,9 @@ class AnalyticsService:
         # historical subset of works, which left researcher faculty/department columns empty.
         # Bumped from 6 -> 7: include OpenAlex-only works alongside DSpace-shaped rows
         # so researcher totals can exceed the DSpace repository subset after enrichment.
-        self._dashboard_rows_cache_snapshot_version = 7
+        # Bumped from 7 -> 8: OpenAlex-only rows include ORCID-linked researcher
+        # affiliations in their faculty/department classification haystack.
+        self._dashboard_rows_cache_snapshot_version = 8
         self._researchers_cache_file = Path("logs/researchers_cache.json")
         # Bumped from 9 -> 10: discard stale partial snapshots that only contained a small
         # historical subset of researchers, which broke the Researchers page top ranking.
@@ -125,7 +129,9 @@ class AnalyticsService:
         # canonical "Rangan Gupta" researcher aggregates.
         # Bumped from 19 -> 20: researcher summaries include OpenAlex-only works that
         # were harvested into MySQL but do not exist in DSpace.
-        self._researchers_cache_snapshot_version = 20
+        # Bumped from 20 -> 21: researcher summaries inherit the improved
+        # OpenAlex-only faculty/department row mapping.
+        self._researchers_cache_snapshot_version = 21
         self._dspace_baseline_cache: tuple[float, dict] | None = None
         self._researchers_all_works_cache: tuple[float, list[dict]] | None = None
         self._researchers_all_works_cache_source: str | None = None
@@ -3381,12 +3387,23 @@ class AnalyticsService:
         session = SessionLocal()
         try:
             works = list(session.execute(select(Work)).scalars())
+            researcher_affiliations_by_work_id = self._researcher_affiliations_by_work_id(session)
         finally:
             session.close()
 
         dashboard_rows: list[dict] = []
         for work in works:
-            faculty, department = classify_work(work)
+            researcher_affiliations = researcher_affiliations_by_work_id.get(work.id, [])
+            affiliations = self._merge_text_lists(work.affiliations, researcher_affiliations)
+            faculty, department = classify_record(
+                title=work.title,
+                abstract=work.abstract,
+                journal=work.journal,
+                publisher=work.publisher,
+                authors=work.authors or [],
+                affiliations=affiliations,
+                keywords=work.keywords or [],
+            )
             publication_url = self._publication_url(work)
             dashboard_rows.append(
                 {
@@ -3400,7 +3417,7 @@ class AnalyticsService:
                         "authors": work.authors or [],
                         "all_dspace_authors": [],
                         "main_author": (work.authors or [None])[0],
-                        "affiliations": work.affiliations or [],
+                        "affiliations": affiliations,
                         "keywords": work.keywords or [],
                         "publication_year": work.publication_year,
                         "document_type": work.document_type,
@@ -3417,6 +3434,39 @@ class AnalyticsService:
                 }
             )
         return dashboard_rows
+
+    def _researcher_affiliations_by_work_id(self, session) -> dict[int, list[str]]:
+        rows = session.execute(
+            select(ResearcherWork.work_id, Researcher.affiliations)
+            .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
+            .where(Researcher.affiliations.is_not(None))
+        ).all()
+        affiliations_by_work_id: dict[int, list[str]] = {}
+        for work_id, affiliations in rows:
+            if not work_id or not isinstance(affiliations, list):
+                continue
+            affiliations_by_work_id[work_id] = self._merge_text_lists(
+                affiliations_by_work_id.get(work_id),
+                affiliations,
+            )
+        return affiliations_by_work_id
+
+    def _merge_text_lists(self, *values: list[str] | None) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                text = " ".join(str(item or "").split()).strip()
+                if not text:
+                    continue
+                key = text.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(text)
+        return merged
 
     def _dashboard_rows_from_article_metadata(self) -> list[dict]:
         records = self._article_metadata_records()
