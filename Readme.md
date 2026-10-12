@@ -154,8 +154,9 @@ ORCID_CLIENT_SECRET=your-orcid-client-secret
 ```
 
 In the default OpenAlex-first rebuild, ORCID is used for enrichment of the
-researcher ORCID iDs already mapped from OpenAlex. `ORCID_RESEARCHERS_PER_RUN=0`
-processes every mapped researcher on each run.
+researcher ORCID iDs already mapped from OpenAlex. `ORCID_RESEARCHERS_PER_RUN`
+caps how many mapped researchers are enriched per run; set it to `0` only when
+you intentionally want to process every mapped researcher in one long run.
 
 If you already have a long-lived `/read-public` token, set `ORCID_ACCESS_TOKEN`
 instead. For verified ORCID sign-in, also set `ORCID_REDIRECT_URI`; the backend
@@ -174,12 +175,18 @@ request pace in `.env`, then rerun without deleting the database:
 ```env
 OPENALEX_API_KEY=your-free-openalex-api-key
 OPENALEX_MAILTO=your.email@example.com
-OPENALEX_PER_PAGE=50
-OPENALEX_REQUEST_DELAY_SECONDS=1
+OPENALEX_PER_PAGE=200
+OPENALEX_REQUEST_DELAY_SECONDS=0.05
 OPENALEX_MAX_ATTEMPTS=12
 OPENALEX_RETRY_AFTER_MAX_SECONDS=60
 OPENALEX_TITLE_ENRICHMENT_LIMIT=0
+OPENALEX_RESEARCHER_EXPANSION=false
+ORCID_RESEARCHERS_PER_RUN=500
 ```
+
+For the fastest initial load, leave `OPENALEX_RESEARCHER_EXPANSION=false`.
+The institution cursor harvest pulls the bulk OpenAlex records; per-researcher
+OpenAlex expansion can be enabled later for smaller catch-up runs.
 
 ## Local backend run without Docker
 

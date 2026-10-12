@@ -28,9 +28,9 @@ class Settings:
     openalex_base_url: str = os.getenv("OPENALEX_BASE_URL", "https://api.openalex.org/works")
     openalex_institution_id: str = os.getenv("OPENALEX_INSTITUTION_ID", "I69552723")
     openalex_api_key: str = os.getenv("OPENALEX_API_KEY", "")
-    openalex_per_page: int = int(os.getenv("OPENALEX_PER_PAGE", "100"))
+    openalex_per_page: int = int(os.getenv("OPENALEX_PER_PAGE", "200"))
     openalex_mailto: str = os.getenv("OPENALEX_MAILTO", os.getenv("OPENALEX_EMAIL", ""))
-    openalex_request_delay_seconds: float = float(os.getenv("OPENALEX_REQUEST_DELAY_SECONDS", "0.25"))
+    openalex_request_delay_seconds: float = float(os.getenv("OPENALEX_REQUEST_DELAY_SECONDS", "0.05"))
     openalex_max_attempts: int = int(os.getenv("OPENALEX_MAX_ATTEMPTS", "8"))
     openalex_retry_after_max_seconds: int = int(os.getenv("OPENALEX_RETRY_AFTER_MAX_SECONDS", "60"))
     openalex_dspace_enrichment_limit: int = int(os.getenv("OPENALEX_DSPACE_ENRICHMENT_LIMIT", "0"))
@@ -41,6 +41,10 @@ class Settings:
     )
     # Keep the institution-wide OpenAlex harvest after the ORCID-driven enrichment.
     openalex_institution_harvest: bool = os.getenv("OPENALEX_INSTITUTION_HARVEST", "true").lower() == "true"
+    # Pulling every mapped researcher's OpenAlex corpus is slow and duplicate-prone during
+    # a clean rebuild. Keep it opt-in; the institution harvest is the fast bulk path.
+    openalex_researcher_expansion: bool = os.getenv("OPENALEX_RESEARCHER_EXPANSION", "false").lower() == "true"
+    openalex_researchers_per_run: int = int(os.getenv("OPENALEX_RESEARCHERS_PER_RUN", "0"))
     orcid_base_url: str = os.getenv("ORCID_BASE_URL", "https://pub.orcid.org/v3.0")
     orcid_oauth_token_url: str = os.getenv("ORCID_OAUTH_TOKEN_URL", "https://orcid.org/oauth/token")
     orcid_authorize_url: str = os.getenv("ORCID_AUTHORIZE_URL", "https://orcid.org/oauth/authorize")
@@ -56,7 +60,7 @@ class Settings:
     orcid_retry_after_max_seconds: int = int(os.getenv("ORCID_RETRY_AFTER_MAX_SECONDS", "60"))
     # Max researchers to process per ORCID run (0 = all). Researchers never harvested come
     # first, then the least recently harvested, so repeated runs rotate through everyone.
-    orcid_researchers_per_run: int = int(os.getenv("ORCID_RESEARCHERS_PER_RUN", "0"))
+    orcid_researchers_per_run: int = int(os.getenv("ORCID_RESEARCHERS_PER_RUN", "500"))
     scopus_base_url: str = os.getenv(
         "SCOPUS_BASE_URL", "https://api.elsevier.com/content/search/scopus"
     )

@@ -370,7 +370,11 @@ class IngestionPipeline:
             "researcher_work_links": 0,
         }
         try:
-            researchers = self._researchers_due(session, Researcher.orcid_harvested_at)
+            researchers = self._researchers_due(
+                session,
+                Researcher.orcid_harvested_at,
+                per_run=settings.orcid_researchers_per_run,
+            )
             counters["researchers_available"] = len(researchers)
             logger.info("ORCID: %s OpenAlex-mapped researchers due for enrichment", len(researchers))
             consecutive_failures = 0
@@ -434,14 +438,13 @@ class IngestionPipeline:
         finally:
             session.close()
 
-    def _researchers_due(self, session, harvested_column) -> list[Researcher]:
+    def _researchers_due(self, session, harvested_column, *, per_run: int) -> list[Researcher]:
         """Never-harvested researchers first, then least recently harvested."""
         query = select(Researcher).order_by(
             case((harvested_column.is_(None), 0), else_=1),
             harvested_column.asc(),
             Researcher.id.asc(),
         )
-        per_run = settings.orcid_researchers_per_run
         if per_run > 0:
             query = query.limit(per_run)
         return list(session.scalars(query).all())
@@ -513,7 +516,17 @@ class IngestionPipeline:
                 if settings.openalex_institution_harvest
                 else {"records_fetched": 0, "records_selected": 0, "records_upserted": 0, "researcher_work_links": 0}
             )
-            by_researcher = self._openalex_by_researcher(session, connector, limit, article_only=article_only)
+            by_researcher = (
+                self._openalex_by_researcher(session, connector, limit, article_only=article_only)
+                if settings.openalex_researcher_expansion
+                else {
+                    "researchers_processed": 0,
+                    "records_fetched": 0,
+                    "records_selected": 0,
+                    "records_upserted": 0,
+                    "researcher_work_links": 0,
+                }
+            )
             by_doi = self._openalex_by_doi(session, connector, article_only=article_only)
             by_title = self._openalex_by_title(
                 session,
@@ -561,7 +574,11 @@ class IngestionPipeline:
             "records_upserted": 0,
             "researcher_work_links": 0,
         }
-        researchers = self._researchers_due(session, Researcher.openalex_harvested_at)
+        researchers = self._researchers_due(
+            session,
+            Researcher.openalex_harvested_at,
+            per_run=settings.openalex_researchers_per_run,
+        )
         logger.info("OpenAlex: %s ORCID-mapped researchers due for researcher-work expansion", len(researchers))
         for position, researcher in enumerate(researchers, start=1):
             if limit > 0 and counters["records_fetched"] >= limit:
