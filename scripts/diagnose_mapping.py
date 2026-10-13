@@ -35,18 +35,19 @@ def main() -> None:
         print(f"researcher_work_links={total_links}")
         print(f"researchers_with_affiliations={researchers_with_affiliations}")
 
-        rows = session.execute(
+        linked_rows = session.execute(
             select(Work, Researcher.affiliations)
             .join(ResearcherWork, ResearcherWork.work_id == Work.id)
             .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
             .where(Researcher.affiliations.is_not(None))
             .limit(1000)
         ).all()
+        work_rows = session.execute(select(Work).limit(1000)).scalars().all()
     finally:
         session.close()
 
-    counts: Counter[tuple[str, str]] = Counter()
-    for work, affiliations in rows:
+    linked_counts: Counter[tuple[str, str]] = Counter()
+    for work, affiliations in linked_rows:
         combined_affiliations = _merge_text_lists(work.affiliations, affiliations)
         faculty, department = classify_record(
             title=work.title,
@@ -57,10 +58,29 @@ def main() -> None:
             affiliations=combined_affiliations,
             keywords=work.keywords or [],
         )
-        counts[(faculty, department)] += 1
+        linked_counts[(faculty, department)] += 1
 
-    print("sampled_linked_work_mappings=")
-    for (faculty, department), count in counts.most_common(20):
+    work_counts: Counter[tuple[str, str]] = Counter()
+    for work in work_rows:
+        faculty, department = classify_record(
+            title=work.title,
+            abstract=work.abstract,
+            journal=work.journal,
+            publisher=work.publisher,
+            authors=work.authors or [],
+            affiliations=work.affiliations or [],
+            keywords=work.keywords or [],
+        )
+        work_counts[(faculty, department)] += 1
+
+    print("sampled_linked_work_mappings_with_researcher_affiliations=")
+    for (faculty, department), count in linked_counts.most_common(20):
+        print(f"  {count}\t{faculty}\t{department}")
+    if not linked_counts:
+        print("  no linked researcher affiliations available yet")
+
+    print("sampled_work_content_mappings=")
+    for (faculty, department), count in work_counts.most_common(20):
         print(f"  {count}\t{faculty}\t{department}")
 
 

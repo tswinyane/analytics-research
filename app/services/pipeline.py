@@ -760,9 +760,18 @@ class IngestionPipeline:
                 )
                 info = wanted.setdefault(
                     orcid,
-                    {"display_name": author.get("display_name"), "openalex_id": author.get("id"), "local": False},
+                    {
+                        "display_name": author.get("display_name"),
+                        "openalex_id": author.get("id"),
+                        "local": False,
+                        "affiliations": [],
+                    },
                 )
                 info["local"] = info["local"] or at_institution
+                info["affiliations"] = self._merge_values(
+                    info["affiliations"],
+                    self._openalex_authorship_affiliations(authorship),
+                )
                 pairs.append((orcid, work_id))
         if not pairs:
             return 0
@@ -781,13 +790,20 @@ class IngestionPipeline:
             if researcher is None and info["local"]:
                 researcher = self._upsert_researcher(
                     session,
-                    {"orcid": orcid, "display_name": info["display_name"], "openalex_author_id": openalex_id},
+                    {
+                        "orcid": orcid,
+                        "display_name": info["display_name"],
+                        "openalex_author_id": openalex_id,
+                        "affiliations": info["affiliations"],
+                    },
                     discovered_via="openalex",
                 )
                 if researcher is not None:
                     researchers[orcid] = researcher
             elif researcher is not None and openalex_id and not researcher.openalex_author_id:
                 researcher.openalex_author_id = openalex_id
+            if researcher is not None and info["affiliations"]:
+                researcher.affiliations = self._merge_values(researcher.affiliations, info["affiliations"])
 
         work_ids_by_researcher: dict[int, list[int]] = {}
         for orcid, work_id in pairs:
@@ -798,6 +814,18 @@ class IngestionPipeline:
             self._link_researcher_works(session, researcher_id, ids, linked_via="openalex")
             for researcher_id, ids in work_ids_by_researcher.items()
         )
+
+    def _openalex_authorship_affiliations(self, authorship: dict) -> list[str]:
+        affiliations: list[str] = []
+        for value in authorship.get("raw_affiliation_strings") or []:
+            text = " ".join(str(value or "").split()).strip()
+            if text:
+                affiliations.append(text)
+        for institution in authorship.get("institutions") or []:
+            name = " ".join(str(institution.get("display_name") or "").split()).strip()
+            if name:
+                affiliations.append(name)
+        return self._merge_values(None, affiliations)
 
     def _title_enrichment_limit(self, run_limit: int, *, override: int | None = None) -> int:
         configured_limit = settings.openalex_title_enrichment_limit if override is None else override

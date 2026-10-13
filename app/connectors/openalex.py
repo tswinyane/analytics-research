@@ -427,6 +427,11 @@ class OpenAlexConnector(BaseConnector):
                         "display_name": (authorship.get("author") or {}).get("display_name"),
                         "orcid": (authorship.get("author") or {}).get("orcid"),
                     },
+                    "raw_affiliation_strings": [
+                        str(value).strip()
+                        for value in authorship.get("raw_affiliation_strings", [])
+                        if str(value or "").strip()
+                    ],
                     "institutions": [
                         {
                             "id": institution.get("id"),
