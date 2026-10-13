@@ -43,6 +43,11 @@ class AnalyticsService:
         self._default_dashboard_warming = False
         self._default_dashboard_warming_lock = threading.Lock()
         self._default_dashboard_warming_ttl_seconds = 15.0
+        # Last successfully computed faculty breakdown / collaboration share. Kept on disk
+        # independent of cache versions and DB fingerprints so a restart (or a harvest that
+        # changed the data) never shows an empty faculty block or 0% while re-warming.
+        self._last_known_metrics_file = Path("logs/dashboard_last_known_metrics.json")
+        self._last_known_metrics: dict | None = None
         self._dashboard_cache: dict[tuple[str | None, str | None, tuple[int, ...], bool], tuple[float, dict]] = {}
         self._dashboard_cache_lock = threading.Lock()
         self._dashboard_refreshing: set[tuple[str | None, str | None, tuple[int, ...], bool]] = set()
@@ -432,17 +437,13 @@ class AnalyticsService:
                 if total_works
                 else 0.0
             )
+            if faculty_counts:
+                self._save_last_known_metrics(faculty_counts, collaboration_percentage)
         else:
             self._warm_default_dashboard_async(cache_key)
-            previous_faculty_rows = (previous_payload or {}).get("facultyBreakdown") or []
-            faculty_counts = {
-                row["faculty"]: int(row.get("count") or 0)
-                for row in previous_faculty_rows
-                if isinstance(row, dict) and row.get("faculty")
-            } or self._faculty_counts_from_article_metadata()
-            collaboration_percentage = float(
-                ((previous_payload or {}).get("kpiSummary") or {}).get("collaboration_percentage") or 0.0
-            )
+            last_known = self._last_known_default_metrics(previous_payload)
+            faculty_counts = last_known.get("faculty_counts") or self._faculty_counts_from_article_metadata()
+            collaboration_percentage = float(last_known.get("collaboration_percentage") or 0.0)
 
         # Top keywords / topic trends. This fast path skips the full per-work annotation and
         # clustering pipeline for speed, but it still needs to report topics â€” otherwise the
@@ -534,6 +535,68 @@ class AnalyticsService:
             self._dashboard_cache[cache_key] = (now + self._default_dashboard_warming_ttl_seconds, payload)
         return payload
 
+    @staticmethod
+    def _metrics_from_dashboard_payload(payload: dict | None) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+        if (payload.get("overview") or {}).get("metrics_warming"):
+            return {}
+        faculty_counts = {
+            row["faculty"]: int(row.get("count") or 0)
+            for row in payload.get("facultyBreakdown") or []
+            if isinstance(row, dict) and row.get("faculty")
+        }
+        collaboration = (payload.get("kpiSummary") or {}).get("collaboration_percentage")
+        if not faculty_counts or not collaboration:
+            return {}
+        return {"faculty_counts": faculty_counts, "collaboration_percentage": float(collaboration)}
+
+    def _last_known_default_metrics(self, previous_payload: dict | None = None) -> dict:
+        if self._last_known_metrics:
+            return self._last_known_metrics
+        candidates: list[dict] = []
+        try:
+            with self._last_known_metrics_file.open("r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if isinstance(stored, dict) and stored.get("faculty_counts"):
+                candidates.append(stored)
+        except (OSError, json.JSONDecodeError):
+            pass
+        candidates.append(self._metrics_from_dashboard_payload(previous_payload))
+        # Older dashboard snapshots (any version / fingerprint) still hold usable last-known
+        # values; they're only a placeholder until the background warm-up finishes.
+        try:
+            with self._dashboard_cache_file.open("r", encoding="utf-8") as handle:
+                snapshot = json.load(handle)
+            for entry in (snapshot or {}).get("entries", []):
+                if entry.get("key") == [None, None, [], False]:
+                    candidates.append(self._metrics_from_dashboard_payload(entry.get("payload")))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+        for candidate in candidates:
+            if candidate and candidate.get("faculty_counts"):
+                self._last_known_metrics = {
+                    "faculty_counts": dict(candidate["faculty_counts"]),
+                    "collaboration_percentage": float(candidate.get("collaboration_percentage") or 0.0),
+                }
+                return self._last_known_metrics
+        return {}
+
+    def _save_last_known_metrics(self, faculty_counts: dict[str, int], collaboration_percentage: float) -> None:
+        metrics = {
+            "faculty_counts": dict(faculty_counts),
+            "collaboration_percentage": float(collaboration_percentage),
+        }
+        if metrics == self._last_known_metrics:
+            return
+        self._last_known_metrics = metrics
+        try:
+            self._last_known_metrics_file.parent.mkdir(parents=True, exist_ok=True)
+            with self._last_known_metrics_file.open("w", encoding="utf-8") as handle:
+                json.dump(metrics, handle)
+        except OSError:
+            logger.warning("Could not write %s", self._last_known_metrics_file)
+
     def _default_dashboard_heavy_metrics_ready(self) -> bool:
         now = time.monotonic()
         rows_ready = self._dashboard_rows_cache is not None and now < self._dashboard_rows_cache_expires_at
@@ -552,20 +615,22 @@ class AnalyticsService:
 
         def warm() -> None:
             started = time.monotonic()
+            # uvicorn configures "uvicorn.error" at INFO, so these lines show up in the
+            # service log / journalctl (the module logger is not configured by uvicorn).
+            log = logging.getLogger("uvicorn.error")
             try:
-                logger.info("Warming default dashboard metrics in the background")
+                log.info("Dashboard warm-up: building dashboard rows (faculty breakdown)...")
                 self._dashboard_rows()
+                log.info("Dashboard warm-up: rows ready after %.1fs; scanning collaboration...", time.monotonic() - started)
                 self._default_dashboard_collaborative_publications()
                 self._default_dashboard_citation_metrics()
                 # Heavy parts are now cached, so this rebuild is quick; holding the lock
                 # only for this step keeps other dashboard requests from queueing.
                 with self._dashboard_cache_lock:
                     self._build_default_dashboard_bundle_fast(cache_key)
-                logger.info(
-                    "Default dashboard metrics warmed in %.1fs", time.monotonic() - started
-                )
+                log.info("Dashboard warm-up: finished in %.1fs", time.monotonic() - started)
             except Exception:
-                logger.exception("Background warm-up of default dashboard metrics failed")
+                log.exception("Dashboard warm-up failed")
             finally:
                 with self._default_dashboard_warming_lock:
                     self._default_dashboard_warming = False
@@ -3299,6 +3364,7 @@ class AnalyticsService:
                 "payload": payload,
             }
             for cache_key, (_, payload) in self._dashboard_cache.items()
+            if not ((payload or {}).get("overview") or {}).get("metrics_warming")
         ]
         try:
             self._dashboard_cache_file.parent.mkdir(parents=True, exist_ok=True)

@@ -430,6 +430,7 @@ export default function App() {
     await loadResearcherProfile(researcher, "", true);
   };
   const facultyPreviewRows = (dashboard?.facultyBreakdown ?? []).slice(0, 5);
+  const dashboardMetricsWarming = Boolean(dashboard?.overview?.metrics_warming);
   const documentTypePreviewRows = (dashboard?.documentTypes ?? []).slice(0, 5);
   const topCitedPreviewRows = (dashboard?.topCitedPublications ?? []).slice(0, 5);
   const activeFilters = {
@@ -640,7 +641,11 @@ export default function App() {
               />
               <MetricCard
                 label="Collaborations"
-                value={`${dashboard?.kpiSummary?.collaboration_percentage ?? 0}%`}
+                value={
+                  dashboardMetricsWarming && !dashboard?.kpiSummary?.collaboration_percentage
+                    ? "Calculating..."
+                    : `${dashboard?.kpiSummary?.collaboration_percentage ?? 0}%`
+                }
                 detail={`Share of collaborative publications / ${dashboardScopeLabel}`}
               />
             </section>
@@ -651,6 +656,7 @@ export default function App() {
                 rows={facultyPreviewRows}
                 labelKey="faculty"
                 valueKey="count"
+                loading={dashboardMetricsWarming && facultyPreviewRows.length === 0}
                 className="panel-compact"
                 headerAction={
                   <button
