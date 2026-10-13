@@ -96,7 +96,11 @@ class AnalyticsService:
         # OpenAlex concepts, not only literal "SDG N" labels.
         # Bumped from 29 -> 30: default SDG counts are computed from the main keyword
         # sample instead of only JSON keywords that literally contain "SDG".
-        self._dashboard_cache_snapshot_version = 30
+        # Bumped from 30 -> 31: researcher KPI is the live count of ORCID researchers (same
+        # source as the Researchers page) instead of the pinned 19224 baseline, and the
+        # default "Records by faculty" block is computed from live dashboard rows instead of
+        # the old outputs/article_metadata_export JSON (empty when that file is missing).
+        self._dashboard_cache_snapshot_version = 31
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -406,7 +410,7 @@ class AnalyticsService:
 
         years = sorted(year_counts.keys())
         topic_trend_years = [year for year in years if year >= 2020]
-        faculty_counts = self._faculty_counts_from_article_metadata()
+        faculty_counts = self._default_dashboard_faculty_counts()
         researcher_count = self._default_dashboard_researcher_count()
         collaborative_publications = self._default_dashboard_collaborative_publications()
         collaboration_percentage = (
@@ -501,7 +505,41 @@ class AnalyticsService:
         return payload
 
     def _default_dashboard_researcher_count(self) -> int:
-        return self._default_institution_researcher_count
+        # Must match the Researchers page default view, which lists every row of the
+        # `researchers` table (see _researchers_from_researcher_links_fast).
+        session = SessionLocal()
+        try:
+            count = session.execute(select(func.count(Researcher.id))).scalar()
+        except Exception:
+            logger.exception("Could not count researchers; falling back to baseline")
+            return self._default_institution_researcher_count
+        finally:
+            session.close()
+        return int(count or 0)
+
+    def _default_dashboard_faculty_counts(self) -> dict[str, int]:
+        # Same basis as the faculty-filtered dashboard (_build_dashboard_bundle), so the
+        # default breakdown agrees with the totals shown when a faculty is selected.
+        counts: dict[str, int] = {}
+        seen_work_ids: set = set()
+        try:
+            rows = self._dashboard_rows()
+        except Exception:
+            logger.exception("Could not build dashboard rows for faculty breakdown")
+            rows = []
+        for item in rows:
+            work = item.get("work") or {}
+            work_id = self._work_value(work, "id")
+            if work_id is not None:
+                if work_id in seen_work_ids:
+                    continue
+                seen_work_ids.add(work_id)
+            faculty = self._visible_mapping_label(item.get("faculty"))
+            if faculty:
+                counts[faculty] = counts.get(faculty, 0) + 1
+        if not counts:
+            counts = self._faculty_counts_from_article_metadata()
+        return counts
 
     def _default_dashboard_citation_metrics(self) -> dict[str, int]:
         now = time.monotonic()
@@ -1082,15 +1120,6 @@ class AnalyticsService:
             article_only=article_only,
             researcher=researcher,
         )
-        is_default_institution_view = (
-            (faculty is None or faculty == "All faculties")
-            and (department is None or department == "All departments")
-            and not publication_years
-            and not article_only
-            and not " ".join(str(researcher or "").split()).strip()
-        )
-        if is_default_institution_view:
-            rows = rows[: self._default_dashboard_researcher_count()]
         if selected_letter:
             rows = [
                 row
