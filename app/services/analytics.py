@@ -1028,16 +1028,11 @@ class AnalyticsService:
         ):
             rows = self._limit_researcher_results(
                 self._filter_researcher_results(
-                    self._researchers_from_all_works(
-                        None,
-                        allow_sync_rebuild=True,
-                    ),
+                    self._researchers_from_researcher_links_fast(None),
                     researcher_query,
                 ),
                 limit,
             )
-            if self._last_researchers_cache_status != "FAST":
-                rows = self._enrich_researchers_with_openalex_metrics(rows)
             return self._rank_researcher_results(rows, researcher_query)
         self._last_researchers_cache_status = "BYPASS"
         if self._is_openalex_unmapped_filter(faculty, department):
@@ -4731,6 +4726,66 @@ class AnalyticsService:
             self._researchers_by_author_key = self._index_researcher_summaries_by_author_key(full_list)
             self._save_researchers_cache_snapshot(full_list)
         return full_list if limit is None else full_list[:limit]
+
+    def _researchers_from_researcher_links_fast(self, limit: int | None) -> list[dict]:
+        session = SessionLocal()
+        try:
+            rows = session.execute(
+                select(
+                    Researcher,
+                    func.count(func.distinct(ResearcherWork.work_id)).label("publication_count"),
+                    func.coalesce(func.sum(Work.citation_count), 0).label("citation_count"),
+                    func.count(func.distinct(Work.journal)).label("journal_count"),
+                    func.max(Work.publication_year).label("latest_year"),
+                )
+                .outerjoin(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
+                .outerjoin(Work, Work.id == ResearcherWork.work_id)
+                .group_by(Researcher.id)
+                .order_by(func.count(func.distinct(ResearcherWork.work_id)).desc(), Researcher.display_name.asc())
+            ).all()
+        finally:
+            session.close()
+
+        researchers: list[dict] = []
+        for researcher, publication_count, citation_count, journal_count, latest_year in rows:
+            display_name = (
+                researcher.display_name
+                or researcher.credit_name
+                or " ".join(
+                    part
+                    for part in (researcher.given_names, researcher.family_name)
+                    if part
+                ).strip()
+                or researcher.orcid
+            )
+            faculty, department = classify_record(
+                authors=[display_name],
+                affiliations=researcher.affiliations or [],
+            )
+            faculty_label = self._visible_mapping_label(faculty)
+            department_label = self._visible_mapping_label(department)
+            researchers.append(
+                {
+                    "researcher": display_name,
+                    "publication_count": int(publication_count or 0),
+                    "citation_count": int(citation_count or 0),
+                    "faculties": [faculty_label] if faculty_label else [self._openalex_unmapped_label],
+                    "departments": [department_label] if department_label else [self._openalex_unmapped_label],
+                    "journal_count": int(journal_count or 0),
+                    "latest_year": self._normalize_publication_year(latest_year),
+                    "orcid": researcher.orcid,
+                    "openalex_author_id": researcher.openalex_author_id,
+                }
+            )
+        researchers.sort(
+            key=lambda item: (
+                -(item.get("publication_count") or 0),
+                -(item.get("citation_count") or 0),
+                self._researcher_sort_name(item.get("researcher")),
+            )
+        )
+        self._last_researchers_cache_status = "LINKS_FAST"
+        return researchers if limit is None else researchers[:limit]
 
     def _researchers_from_source_records_fast(
         self,
