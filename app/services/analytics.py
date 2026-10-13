@@ -131,7 +131,9 @@ class AnalyticsService:
         # were harvested into MySQL but do not exist in DSpace.
         # Bumped from 20 -> 21: researcher summaries inherit the improved
         # OpenAlex-only faculty/department row mapping.
-        self._researchers_cache_snapshot_version = 21
+        # Bumped from 21 -> 22: researcher list and faculty/department filters use
+        # the OpenAlex/ORCID dashboard-row mapping instead of the legacy metadata path.
+        self._researchers_cache_snapshot_version = 22
         self._dspace_baseline_cache: tuple[float, dict] | None = None
         self._researchers_all_works_cache: tuple[float, list[dict]] | None = None
         self._researchers_all_works_cache_source: str | None = None
@@ -1001,7 +1003,7 @@ class AnalyticsService:
                 self._filter_researcher_results(
                     self._researchers_from_all_works(
                         None,
-                        allow_sync_rebuild=False,
+                        allow_sync_rebuild=True,
                     ),
                     researcher_query,
                 ),
@@ -1017,26 +1019,16 @@ class AnalyticsService:
                 publication_years,
                 article_only,
             )
-        elif publication_years:
-            self._last_researchers_cache_status = "FAST"
-            researcher_rows = self._filter_researcher_results(
-                self._researchers_from_source_records_fast(
-                    None,
-                    faculty=faculty,
-                    department=department,
-                    publication_years=publication_years,
-                    article_only=article_only,
-                ),
-                researcher_query,
-            )
         else:
+            dashboard_rows = self._filter_annotated_works(
+                self._dashboard_rows(),
+                faculty,
+                department,
+                article_only,
+                publication_years,
+            )
             researcher_rows = self._filter_researcher_results(
-                self._researchers_from_article_metadata(
-                    faculty,
-                    department,
-                    publication_years,
-                    article_only,
-                ),
+                self._researchers_from_dashboard_rows(dashboard_rows, None),
                 researcher_query,
             )
         rows = self._limit_researcher_results(researcher_rows, limit)
