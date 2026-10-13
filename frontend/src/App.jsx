@@ -120,6 +120,15 @@ export default function App() {
       const dashboardPayload = await fetchDashboard(filters);
       if (dashboardRequestId.current === requestId) {
         setDashboard(dashboardPayload);
+        // After a backend restart the faculty breakdown / collaboration figures warm in the
+        // background; re-fetch shortly so they fill in without a manual reload.
+        if (dashboardPayload?.overview?.metrics_warming) {
+          window.setTimeout(() => {
+            if (dashboardRequestId.current === requestId) {
+              loadDashboard(faculty, department, publicationYears);
+            }
+          }, 20000);
+        }
       }
     } catch (requestError) {
       if (dashboardRequestId.current === requestId) {

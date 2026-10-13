@@ -39,6 +39,10 @@ class AnalyticsService:
         self._annotated_cache_expires_at: float = 0.0
         self._dashboard_rows_cache: list[dict] | None = None
         self._dashboard_rows_cache_expires_at: float = 0.0
+        self._dashboard_rows_build_lock = threading.Lock()
+        self._default_dashboard_warming = False
+        self._default_dashboard_warming_lock = threading.Lock()
+        self._default_dashboard_warming_ttl_seconds = 15.0
         self._dashboard_cache: dict[tuple[str | None, str | None, tuple[int, ...], bool], tuple[float, dict]] = {}
         self._dashboard_cache_lock = threading.Lock()
         self._dashboard_refreshing: set[tuple[str | None, str | None, tuple[int, ...], bool]] = set()
@@ -100,7 +104,9 @@ class AnalyticsService:
         # source as the Researchers page) instead of the pinned 19224 baseline, and the
         # default "Records by faculty" block is computed from live dashboard rows instead of
         # the old outputs/article_metadata_export JSON (empty when that file is missing).
-        self._dashboard_cache_snapshot_version = 31
+        # Bumped from 31 -> 32: the default dashboard no longer blocks on the slow
+        # dashboard-row build / collaboration scan; those warm in the background.
+        self._dashboard_cache_snapshot_version = 32
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -410,14 +416,33 @@ class AnalyticsService:
 
         years = sorted(year_counts.keys())
         topic_trend_years = [year for year in years if year >= 2020]
-        faculty_counts = self._default_dashboard_faculty_counts()
         researcher_count = self._default_dashboard_researcher_count()
-        collaborative_publications = self._default_dashboard_collaborative_publications()
-        collaboration_percentage = (
-            round((collaborative_publications / total_works) * 100, 1)
-            if total_works
-            else 0.0
-        )
+        # Faculty breakdown and collaboration need a full scan of every work + raw source
+        # payload (several minutes on a cold start). Never block the front page on that:
+        # use them when already warm, otherwise reuse the last known values and warm them
+        # in the background.
+        heavy_metrics_ready = self._default_dashboard_heavy_metrics_ready()
+        previous_entry = self._dashboard_cache.get(cache_key)
+        previous_payload = previous_entry[1] if previous_entry else None
+        if heavy_metrics_ready:
+            faculty_counts = self._default_dashboard_faculty_counts()
+            collaborative_publications = self._default_dashboard_collaborative_publications()
+            collaboration_percentage = (
+                round((collaborative_publications / total_works) * 100, 1)
+                if total_works
+                else 0.0
+            )
+        else:
+            self._warm_default_dashboard_async(cache_key)
+            previous_faculty_rows = (previous_payload or {}).get("facultyBreakdown") or []
+            faculty_counts = {
+                row["faculty"]: int(row.get("count") or 0)
+                for row in previous_faculty_rows
+                if isinstance(row, dict) and row.get("faculty")
+            } or self._faculty_counts_from_article_metadata()
+            collaboration_percentage = float(
+                ((previous_payload or {}).get("kpiSummary") or {}).get("collaboration_percentage") or 0.0
+            )
 
         # Top keywords / topic trends. This fast path skips the full per-work annotation and
         # clustering pipeline for speed, but it still needs to report topics â€” otherwise the
@@ -479,6 +504,7 @@ class AnalyticsService:
                 "selected_department": "All departments",
                 "selected_publication_years": [],
                 "latest_run": latest_runs[0] if latest_runs else None,
+                "metrics_warming": not heavy_metrics_ready,
             },
             "kpiSummary": {
                 "publications": total_works,
@@ -500,9 +526,51 @@ class AnalyticsService:
             "openAccess": self._rank_counts(open_access_counts, "open_access_status"),
             "runs": latest_runs,
         }
-        self._dashboard_cache[cache_key] = (now + self._dashboard_cache_ttl_seconds, payload)
-        self._save_dashboard_cache_snapshot()
+        if heavy_metrics_ready:
+            self._dashboard_cache[cache_key] = (now + self._dashboard_cache_ttl_seconds, payload)
+            self._save_dashboard_cache_snapshot()
+        else:
+            # Short TTL and no snapshot: the next request after warm-up gets full numbers.
+            self._dashboard_cache[cache_key] = (now + self._default_dashboard_warming_ttl_seconds, payload)
         return payload
+
+    def _default_dashboard_heavy_metrics_ready(self) -> bool:
+        now = time.monotonic()
+        rows_ready = self._dashboard_rows_cache is not None and now < self._dashboard_rows_cache_expires_at
+        collab = self._dashboard_metric_cache.get("collaborative_publications")
+        collab_ready = collab is not None and now < collab[0]
+        return rows_ready and collab_ready
+
+    def _warm_default_dashboard_async(
+        self,
+        cache_key: tuple[str | None, str | None, tuple[int, ...], bool] = (None, None, (), False),
+    ) -> None:
+        with self._default_dashboard_warming_lock:
+            if self._default_dashboard_warming:
+                return
+            self._default_dashboard_warming = True
+
+        def warm() -> None:
+            started = time.monotonic()
+            try:
+                logger.info("Warming default dashboard metrics in the background")
+                self._dashboard_rows()
+                self._default_dashboard_collaborative_publications()
+                self._default_dashboard_citation_metrics()
+                # Heavy parts are now cached, so this rebuild is quick; holding the lock
+                # only for this step keeps other dashboard requests from queueing.
+                with self._dashboard_cache_lock:
+                    self._build_default_dashboard_bundle_fast(cache_key)
+                logger.info(
+                    "Default dashboard metrics warmed in %.1fs", time.monotonic() - started
+                )
+            except Exception:
+                logger.exception("Background warm-up of default dashboard metrics failed")
+            finally:
+                with self._default_dashboard_warming_lock:
+                    self._default_dashboard_warming = False
+
+        threading.Thread(target=warm, name="dashboard-warmup", daemon=True).start()
 
     def _default_dashboard_researcher_count(self) -> int:
         # Must match the Researchers page default view, which lists every row of the
@@ -3200,12 +3268,13 @@ class AnalyticsService:
             return
 
         now = time.monotonic()
-        if (
-            not isinstance(snapshot, dict)
-            or snapshot.get("version") != self._dashboard_cache_snapshot_version
-            or snapshot.get("db_fingerprint") != self._source_records_cache_fingerprint()
-        ):
+        if not isinstance(snapshot, dict) or snapshot.get("version") != self._dashboard_cache_snapshot_version:
             return
+        # If the data changed since the snapshot (e.g. a harvest ran), still serve it but
+        # mark it expired so the first request returns instantly and refreshes in the
+        # background, instead of blocking on a full rebuild.
+        fresh = snapshot.get("db_fingerprint") == self._source_records_cache_fingerprint()
+        expires_at = now + self._dashboard_cache_ttl_seconds if fresh else 0.0
 
         entries = snapshot.get("entries", [])
         for entry in entries:
@@ -3221,7 +3290,7 @@ class AnalyticsService:
                         continue
                     if overview.get("metric_computation_version") != self._dashboard_metric_computation_version:
                         continue
-                self._dashboard_cache[cache_key] = (now + self._dashboard_cache_ttl_seconds, payload)
+                self._dashboard_cache[cache_key] = (expires_at, payload)
 
     def _save_dashboard_cache_snapshot(self) -> None:
         entries = [
@@ -3464,7 +3533,18 @@ class AnalyticsService:
         now = time.monotonic()
         if self._dashboard_rows_cache is not None and now < self._dashboard_rows_cache_expires_at:
             return self._dashboard_rows_cache
+        with self._dashboard_rows_build_lock:
+            now = time.monotonic()
+            if self._dashboard_rows_cache is not None and now < self._dashboard_rows_cache_expires_at:
+                return self._dashboard_rows_cache
+            # The snapshot written by the last build was never read back, so every restart
+            # paid for a full rebuild. Reuse it when the harvested data hasn't changed.
+            snapshot_rows = self._load_dashboard_rows_cache_snapshot()
+            if snapshot_rows is not None:
+                return snapshot_rows
+            return self._build_dashboard_rows(now)
 
+    def _build_dashboard_rows(self, now: float) -> list[dict]:
         session = SessionLocal()
         try:
             dspace_rows = session.execute(
