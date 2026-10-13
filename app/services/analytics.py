@@ -94,7 +94,9 @@ class AnalyticsService:
         # using ORCID-linked researcher affiliations when available.
         # Bumped from 28 -> 29: SDG keywords include sustainability topic terms from
         # OpenAlex concepts, not only literal "SDG N" labels.
-        self._dashboard_cache_snapshot_version = 29
+        # Bumped from 29 -> 30: default SDG counts are computed from the main keyword
+        # sample instead of only JSON keywords that literally contain "SDG".
+        self._dashboard_cache_snapshot_version = 30
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -377,11 +379,6 @@ class AnalyticsService:
                 .order_by(Work.id.desc())
                 .limit(10000)
             ).all()
-            sdg_keyword_rows = session.execute(
-                select(Work.keywords)
-                .where(Work.keywords.isnot(None))
-                .where(func.JSON_SEARCH(Work.keywords, "all", "%SDG%").isnot(None))
-            ).scalars().all()
         finally:
             session.close()
 
@@ -440,11 +437,9 @@ class AnalyticsService:
             key=lambda x: (-x[1], x[0].lower()),
         )[:12]
         sdg_keyword_counts: dict[str, int] = {}
-        for raw_keywords in sdg_keyword_rows:
-            for keyword in raw_keywords or []:
-                label = " ".join(str(keyword or "").split()).strip()
-                if self._is_sdg_keyword(label):
-                    sdg_keyword_counts[label] = sdg_keyword_counts.get(label, 0) + 1
+        for label, count in keyword_counts.items():
+            if self._is_sdg_keyword(label):
+                sdg_keyword_counts[label] = count
         topic_trends = [
             {
                 "topic": topic,
@@ -2105,6 +2100,19 @@ class AnalyticsService:
             selected_letter = ""
         search_query = self._normalize_search_text(search)
 
+        if (
+            (faculty is None or faculty == "All faculties")
+            and (department is None or department == "All departments")
+        ):
+            return self._publication_browse_works_sql_page(
+                page=page,
+                page_size=page_size,
+                selected_years=selected_years,
+                selected_letter=selected_letter,
+                search_query=search_query,
+                article_only=article_only,
+            )
+
         rows = self._publication_browse_dashboard_rows(
             faculty=faculty,
             department=department,
@@ -2202,6 +2210,87 @@ class AnalyticsService:
             )
         )
         return rows
+
+    def _publication_browse_works_sql_page(
+        self,
+        *,
+        page: int,
+        page_size: int,
+        selected_years: set[int],
+        selected_letter: str,
+        search_query: str,
+        article_only: bool,
+    ) -> dict:
+        filters = []
+        if selected_years:
+            filters.append(Work.publication_year.in_(selected_years))
+        if article_only:
+            filters.append(Work.document_type.ilike("%article%"))
+        if search_query:
+            filters.append(cast(Work.title, String).ilike(f"%{search_query}%"))
+        if selected_letter:
+            filters.append(cast(Work.title, String).ilike(f"{selected_letter}%"))
+
+        offset = (page - 1) * page_size
+        session = SessionLocal()
+        try:
+            total_query = select(func.count()).select_from(Work)
+            rows_query = (
+                select(Work)
+                .order_by(Work.publication_year.desc(), Work.id.desc())
+                .offset(offset)
+                .limit(page_size)
+            )
+            if filters:
+                total_query = total_query.where(*filters)
+                rows_query = rows_query.where(*filters)
+            total = int(session.execute(total_query).scalar() or 0)
+            works = session.execute(rows_query).scalars().all()
+        finally:
+            session.close()
+
+        rows: list[dict] = []
+        for work in works:
+            faculty, department = classify_record(
+                title=work.title,
+                abstract=work.abstract,
+                journal=work.journal,
+                publisher=work.publisher,
+                authors=work.authors or [],
+                affiliations=work.affiliations or [],
+                keywords=work.keywords or [],
+            )
+            faculty_label = self._visible_mapping_label(faculty) or "Unmapped"
+            department_label = self._visible_mapping_label(department) or "Unmapped"
+            publication_url = self._publication_url(work)
+            authors = self._iter_author_entries(work.authors or [])
+            rows.append(
+                {
+                    "id": work.id,
+                    "title": work.title,
+                    "faculty": faculty_label,
+                    "department": department_label,
+                    "doi": work.doi,
+                    "publication_year": work.publication_year,
+                    "journal": work.journal,
+                    "document_type": work.document_type,
+                    "citation_count": work.citation_count,
+                    "authors": authors,
+                    "author_count": len(authors),
+                    "source_names": work.source_names or [],
+                    "open_access_status": work.open_access_status,
+                    "uri": publication_url,
+                    "publication_url": publication_url,
+                }
+            )
+        total_pages = max((total + page_size - 1) // page_size, 1)
+        return {
+            "rows": rows,
+            "total": total,
+            "page": min(page, total_pages),
+            "page_size": page_size,
+            "total_pages": total_pages,
+        }
 
     def _publication_browse_metadata_page(
         self,
