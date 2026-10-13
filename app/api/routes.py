@@ -204,7 +204,6 @@ def publications(
         row
         for row in rows
         if _is_visible_mapping_label(row.get("faculty"))
-        and _is_visible_mapping_label(row.get("department"))
     ]
 
 

@@ -92,7 +92,9 @@ class AnalyticsService:
         # after every fix.
         # Bumped from 27 -> 28: OpenAlex-only dashboard rows classify faculty/department
         # using ORCID-linked researcher affiliations when available.
-        self._dashboard_cache_snapshot_version = 28
+        # Bumped from 28 -> 29: SDG keywords include sustainability topic terms from
+        # OpenAlex concepts, not only literal "SDG N" labels.
+        self._dashboard_cache_snapshot_version = 29
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -627,7 +629,37 @@ class AnalyticsService:
         text = " ".join(str(keyword or "").split())
         if not text:
             return False
-        return re.search(r"\bSDG\s*[-:]?\s*(?:[0-9]{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b", text, re.IGNORECASE) is not None
+        if re.search(r"\bSDG\s*[-:]?\s*(?:[0-9]{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\b", text, re.IGNORECASE):
+            return True
+        normalized = text.lower()
+        sdg_terms = (
+            "sustainable development",
+            "sustainability",
+            "poverty",
+            "food security",
+            "zero hunger",
+            "public health",
+            "well-being",
+            "quality education",
+            "gender equality",
+            "clean water",
+            "sanitation",
+            "renewable energy",
+            "clean energy",
+            "decent work",
+            "economic growth",
+            "industry innovation",
+            "reduced inequalities",
+            "sustainable cities",
+            "responsible consumption",
+            "climate action",
+            "life below water",
+            "life on land",
+            "biodiversity",
+            "peace justice",
+            "strong institutions",
+        )
+        return any(term in normalized for term in sdg_terms)
 
     def _build_dashboard_bundle(
         self,
@@ -2073,30 +2105,7 @@ class AnalyticsService:
             selected_letter = ""
         search_query = self._normalize_search_text(search)
 
-        if article_only and not selected_years:
-            return self._publication_browse_metadata_page(
-                page=page,
-                page_size=page_size,
-                faculty=faculty,
-                department=department,
-                selected_letter=selected_letter,
-                search_query=search_query,
-            )
-
-        if (
-            (faculty is None or faculty == "All faculties")
-            and (department is None or department == "All departments")
-        ):
-            return self._publication_browse_sql_page(
-                page=page,
-                page_size=page_size,
-                selected_years=selected_years,
-                selected_letter=selected_letter,
-                search_query=search_query,
-                article_only=article_only,
-            )
-
-        rows = self._publication_browse_rows(
+        rows = self._publication_browse_dashboard_rows(
             faculty=faculty,
             department=department,
             selected_years=selected_years,
@@ -2115,6 +2124,84 @@ class AnalyticsService:
             "page_size": page_size,
             "total_pages": total_pages,
         }
+
+    def _publication_browse_dashboard_rows(
+        self,
+        *,
+        faculty: str | None,
+        department: str | None,
+        selected_years: set[int],
+        selected_letter: str,
+        search_query: str,
+        article_only: bool,
+    ) -> list[dict]:
+        dashboard_rows = self._filter_annotated_works(
+            self._dashboard_rows(),
+            faculty,
+            department,
+            article_only,
+            tuple(sorted(selected_years)),
+        )
+        rows: list[dict] = []
+        seen_keys: set[str] = set()
+        for item in dashboard_rows:
+            work = item.get("work") or {}
+            title = str(work.get("title") or "").strip()
+            if not title or title == "Untitled publication":
+                continue
+            normalized_title = self._normalize_search_text(title)
+            if search_query and search_query not in normalized_title:
+                continue
+            if selected_letter and not normalized_title.startswith(selected_letter):
+                continue
+            faculty_label = self._visible_mapping_label(item.get("faculty")) or "Unmapped"
+            department_label = self._visible_mapping_label(item.get("department")) or "Unmapped"
+            if not self._visible_mapping_label(faculty_label):
+                continue
+            doi_key = self._normalize_doi_key(work.get("doi"))
+            title_key = self._title_fingerprint(title)
+            row_keys = [
+                key
+                for key in (
+                    f"doi:{doi_key}" if doi_key else "",
+                    f"title:{title_key}" if title_key else "",
+                    f"id:{work.get('id')}" if work.get("id") is not None else "",
+                )
+                if key
+            ]
+            if any(key in seen_keys for key in row_keys):
+                continue
+            seen_keys.update(row_keys)
+            publication_url = self._dspace_uri_from_work(work) or self._publication_url(work)
+            authors = self._iter_author_entries(work.get("authors") or [])
+            rows.append(
+                {
+                    "id": work.get("id"),
+                    "title": title,
+                    "faculty": faculty_label,
+                    "department": department_label,
+                    "doi": work.get("doi"),
+                    "publication_year": work.get("publication_year"),
+                    "journal": work.get("journal"),
+                    "document_type": work.get("document_type"),
+                    "citation_count": work.get("citation_count"),
+                    "authors": authors,
+                    "author_count": len(authors),
+                    "source_names": work.get("source_names") or [],
+                    "open_access_status": work.get("open_access_status"),
+                    "uri": publication_url,
+                    "publication_url": publication_url,
+                }
+            )
+        rows.sort(
+            key=lambda row: (
+                str(row.get("title") or "").lower()
+                if selected_letter
+                else -(row.get("publication_year") or 0),
+                str(row.get("title") or "").lower(),
+            )
+        )
+        return rows
 
     def _publication_browse_metadata_page(
         self,
@@ -3779,7 +3866,6 @@ class AnalyticsService:
             item
             for item in annotated
             if self._visible_mapping_label(item["faculty"])
-            and self._visible_mapping_label(item["department"])
         ]
         sorted_items = sorted(
             visible_items,
@@ -3794,7 +3880,7 @@ class AnalyticsService:
                 "id": item["work"].id,
                 "title": item["work"].title,
                 "faculty": self._visible_mapping_label(item["faculty"]),
-                "department": self._visible_mapping_label(item["department"]),
+                "department": self._visible_mapping_label(item["department"]) or "Unmapped",
                 "doi": item["work"].doi,
                 "publication_year": item["work"].publication_year,
                 "journal": item["work"].journal,
@@ -3812,7 +3898,6 @@ class AnalyticsService:
             item
             for item in rows
             if self._visible_mapping_label(item["faculty"])
-            and self._visible_mapping_label(item["department"])
         ]
         sorted_items = sorted(
             visible_rows,
@@ -3827,7 +3912,7 @@ class AnalyticsService:
                 "id": item["work"].get("id"),
                 "title": item["work"].get("title"),
                 "faculty": self._visible_mapping_label(item["faculty"]),
-                "department": self._visible_mapping_label(item["department"]),
+                "department": self._visible_mapping_label(item["department"]) or "Unmapped",
                 "doi": item["work"].get("doi"),
                 "publication_year": item["work"].get("publication_year"),
                 "journal": item["work"].get("journal"),
