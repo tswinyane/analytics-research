@@ -320,6 +320,36 @@ class AnalyticsService:
         publication_years: list[int] | None = None,
         article_only: bool = False,
     ) -> dict:
+        payload = self._dashboard_bundle_cached(faculty, department, publication_years, article_only)
+        is_default_scope = (
+            (faculty is None or faculty == "All faculties")
+            and (department is None or department == "All departments")
+            and not self._normalize_publication_years(publication_years)
+            and not article_only
+        )
+        if not is_default_scope:
+            return payload
+        # The dashboard payload is cached for up to an hour (and served stale while it
+        # refreshes), but the Researchers page counts the `researchers` table live. Overlay
+        # the live count so both pages always agree, even straight after a harvest.
+        live_count = self._default_dashboard_researcher_count()
+        overview = payload.get("overview") or {}
+        kpis = payload.get("kpiSummary") or {}
+        if overview.get("researcher_count") == live_count and kpis.get("researchers") == live_count:
+            return payload
+        return {
+            **payload,
+            "overview": {**overview, "researcher_count": live_count},
+            "kpiSummary": {**kpis, "researchers": live_count},
+        }
+
+    def _dashboard_bundle_cached(
+        self,
+        faculty: str | None = None,
+        department: str | None = None,
+        publication_years: list[int] | None = None,
+        article_only: bool = False,
+    ) -> dict:
         selected_years = self._normalize_publication_years(publication_years)
         cache_key = (faculty, department, selected_years, article_only)
         now = time.monotonic()

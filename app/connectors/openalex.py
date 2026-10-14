@@ -21,6 +21,11 @@ class OpenAlexConnector(BaseConnector):
 
     def __init__(self) -> None:
         self._last_request_at = 0.0
+        # Set by fetch(): where the institution harvest stopped, so the next limited run
+        # resumes there instead of re-reading the same oldest works.
+        self._fetch_filter: str | None = None
+        self._fetch_next_cursor: str | None = None
+        self._fetch_exhausted = False
 
     def fetch(
         self,
@@ -31,9 +36,23 @@ class OpenAlexConnector(BaseConnector):
         remaining = None if limit <= 0 else max(limit, 0)
         filters = [f"institutions.id:{settings.openalex_institution_id}"]
 
-        from_date = (state or {}).get("last_publication_date")
-        if from_date:
-            filters.append(f"from_publication_date:{from_date}")
+        state = state or {}
+        saved_cursor = state.get("cursor")
+        saved_filter = state.get("filter")
+        from_date = state.get("last_publication_date")
+        if saved_cursor and saved_filter:
+            # Mid-way through a full pass: continue from the exact page we stopped at.
+            filter_value = saved_filter
+            cursor = saved_cursor
+            logger.info("OpenAlex institution harvest: resuming previous pass from saved cursor")
+        else:
+            if from_date:
+                filters.append(f"from_publication_date:{from_date}")
+            filter_value = ",".join(filters)
+
+        self._fetch_filter = filter_value
+        self._fetch_next_cursor = cursor
+        self._fetch_exhausted = False
 
         fetched = 0
         page_number = 0
@@ -44,16 +63,31 @@ class OpenAlexConnector(BaseConnector):
             )
 
             params = {
-                "filter": ",".join(filters),
+                "filter": filter_value,
                 "per-page": per_page,
                 "cursor": cursor,
                 "sort": "publication_date:asc",
             }
 
-            response = self._get_with_retries(params)
+            try:
+                response = self._get_with_retries(params)
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if page_number == 0 and cursor != "*" and status == 400:
+                    # Saved cursor no longer accepted: restart the pass from the last
+                    # publication date we reached (upserts make re-reads harmless).
+                    logger.warning("OpenAlex rejected the saved cursor; restarting from the last publication date")
+                    filter_value = ",".join(
+                        filters + ([f"from_publication_date:{from_date}"] if from_date else [])
+                    )
+                    self._fetch_filter = filter_value
+                    cursor = "*"
+                    continue
+                raise
             payload = response.json()
             results = payload.get("results", [])
             if not results:
+                self._fetch_exhausted = True
                 break
             page_number += 1
             fetched += len(results)
@@ -71,7 +105,9 @@ class OpenAlexConnector(BaseConnector):
                 remaining -= len(results)
 
             cursor = payload.get("meta", {}).get("next_cursor")
+            self._fetch_next_cursor = cursor
             if not cursor:
+                self._fetch_exhausted = True
                 break
 
     def fetch_for_orcid(self, orcid: str) -> Iterable[HarmonizedPublication]:
@@ -209,7 +245,13 @@ class OpenAlexConnector(BaseConnector):
             iso_date = publication.publication_date.isoformat()
             if max_date is None or iso_date > max_date:
                 max_date = iso_date
-        return {"last_publication_date": max_date} if max_date else previous_state
+        state: dict = {"last_publication_date": max_date} if max_date else {}
+        if not self._fetch_exhausted and self._fetch_next_cursor and self._fetch_filter:
+            # Pass not finished (stopped by --limit): remember the cursor so the next run
+            # continues with the next page rather than starting from the oldest works.
+            state["cursor"] = self._fetch_next_cursor
+            state["filter"] = self._fetch_filter
+        return state or previous_state
 
     def _get_with_retries(self, params: dict) -> requests.Response:
         timeout_seconds = 180

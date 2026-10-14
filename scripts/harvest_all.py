@@ -82,6 +82,14 @@ def main() -> int:
     logger.info("Per-source limit: %s", args.limit)
     logger.info("Article-only filter: %s", args.article_only)
     logger.info("Reset harvest state: %s", args.reset_state)
+    if args.reset_state and args.limit > 0:
+        logger.warning(
+            "--reset-state with --limit %s restarts from the OLDEST OpenAlex works and the "
+            "first ORCID researchers every run, so repeated runs re-harvest the same records "
+            "and totals will not grow. Run without --reset-state to continue where the last "
+            "run stopped.",
+            args.limit,
+        )
     logger.info(
         "OpenAlex title enrichment limit: %s",
         "configured default" if args.title_enrichment_limit is None else args.title_enrichment_limit,
