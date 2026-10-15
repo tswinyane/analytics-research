@@ -9,7 +9,7 @@ import unicodedata
 from pathlib import Path
 
 import requests
-from sqlalchemy import String, case, cast, func, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
@@ -111,7 +111,8 @@ class AnalyticsService:
         # the old outputs/article_metadata_export JSON (empty when that file is missing).
         # Bumped from 31 -> 32: the default dashboard no longer blocks on the slow
         # dashboard-row build / collaboration scan; those warm in the background.
-        self._dashboard_cache_snapshot_version = 32
+        # Bumped from 32 -> 33: faculty/department matcher rewritten (tiered evidence).
+        self._dashboard_cache_snapshot_version = 33
         self._dashboard_metric_computation_version = 2
         self._default_institution_researcher_count = 19224
         self._openalex_unmapped_label = "Unmapped"
@@ -123,7 +124,8 @@ class AnalyticsService:
         # so researcher totals can exceed the DSpace repository subset after enrichment.
         # Bumped from 7 -> 8: OpenAlex-only rows include ORCID-linked researcher
         # affiliations in their faculty/department classification haystack.
-        self._dashboard_rows_cache_snapshot_version = 8
+        # Bumped from 8 -> 9: faculty/department matcher rewritten (tiered evidence).
+        self._dashboard_rows_cache_snapshot_version = 9
         self._researchers_cache_file = Path("logs/researchers_cache.json")
         # Bumped from 9 -> 10: discard stale partial snapshots that only contained a small
         # historical subset of researchers, which broke the Researchers page top ranking.
@@ -152,7 +154,8 @@ class AnalyticsService:
         # OpenAlex-only faculty/department row mapping.
         # Bumped from 21 -> 22: researcher list and faculty/department filters use
         # the OpenAlex/ORCID dashboard-row mapping instead of the legacy metadata path.
-        self._researchers_cache_snapshot_version = 22
+        # Bumped from 22 -> 23: faculty/department matcher rewritten (tiered evidence).
+        self._researchers_cache_snapshot_version = 23
         self._dspace_baseline_cache: tuple[float, dict] | None = None
         self._researchers_all_works_cache: tuple[float, list[dict]] | None = None
         self._researchers_all_works_cache_source: str | None = None
@@ -327,12 +330,21 @@ class AnalyticsService:
             and not self._normalize_publication_years(publication_years)
             and not article_only
         )
-        if not is_default_scope:
-            return payload
         # The dashboard payload is cached for up to an hour (and served stale while it
-        # refreshes), but the Researchers page counts the `researchers` table live. Overlay
-        # the live count so both pages always agree, even straight after a harvest.
-        live_count = self._default_dashboard_researcher_count()
+        # refreshes), but the Researchers page counts ORCID-linked researchers live. Overlay
+        # the same live count, for the same filters, so both pages always agree.
+        if is_default_scope:
+            live_count = self._default_dashboard_researcher_count()
+        else:
+            live_count = len(
+                self._researchers_from_researcher_links_fast(
+                    None,
+                    faculty=faculty,
+                    department=department,
+                    publication_years=publication_years,
+                    article_only=article_only,
+                )
+            )
         overview = payload.get("overview") or {}
         kpis = payload.get("kpiSummary") or {}
         if overview.get("researcher_count") == live_count and kpis.get("researchers") == live_count:
@@ -1221,40 +1233,21 @@ class AnalyticsService:
         researcher: str | None = None,
     ) -> list[dict]:
         researcher_query = " ".join(str(researcher or "").split()).strip()
-        if (
-            (faculty is None or faculty == "All faculties")
-            and (department is None or department == "All departments")
-            and not article_only
-            and not publication_years
-        ):
-            rows = self._limit_researcher_results(
-                self._filter_researcher_results(
-                    self._researchers_from_researcher_links_fast(None),
-                    researcher_query,
+        # Every view (filtered or not) lists ORCID-identified researchers and counts their
+        # ORCID-linked works, so totals match the profile popup and the dashboard KPI.
+        rows = self._limit_researcher_results(
+            self._filter_researcher_results(
+                self._researchers_from_researcher_links_fast(
+                    None,
+                    faculty=faculty,
+                    department=department,
+                    publication_years=publication_years,
+                    article_only=article_only,
                 ),
-                limit,
-            )
-            return self._rank_researcher_results(rows, researcher_query)
-        self._last_researchers_cache_status = "BYPASS"
-        if self._is_openalex_unmapped_filter(faculty, department):
-            researcher_rows = self._openalex_unmapped_researcher_rows(
                 researcher_query,
-                publication_years,
-                article_only,
-            )
-        else:
-            dashboard_rows = self._filter_annotated_works(
-                self._dashboard_rows(),
-                faculty,
-                department,
-                article_only,
-                publication_years,
-            )
-            researcher_rows = self._filter_researcher_results(
-                self._researchers_from_dashboard_rows(dashboard_rows, None),
-                researcher_query,
-            )
-        rows = self._limit_researcher_results(researcher_rows, limit)
+            ),
+            limit,
+        )
         return self._rank_researcher_results(rows, researcher_query)
 
     def researchers_browse(
@@ -1371,10 +1364,12 @@ class AnalyticsService:
         publication_years: list[int] | tuple[int, ...] | None = None,
         article_only: bool = False,
         publication_title: str | None = None,
+        orcid: str | None = None,
     ) -> dict:
         selected_years = self._normalize_publication_years(publication_years)
         publication_title_query = self._normalize_search_text(publication_title)
-        cache_key = (researcher, faculty, department, selected_years, article_only, publication_title_query)
+        orcid = self._normalize_profile_orcid(orcid)
+        cache_key = (researcher, faculty, department, selected_years, article_only, publication_title_query, orcid)
         now = time.monotonic()
         cached = self._researcher_profile_cache.get(cache_key)
         if cached is not None and now < cached[0]:
@@ -1390,7 +1385,24 @@ class AnalyticsService:
             )
             and not self._is_openalex_unmapped_filter(faculty, department)
         )
-        if use_metadata_profile_rows:
+        linked_rows = (
+            self._researcher_profile_rows_from_links(
+                orcid=orcid,
+                faculty=faculty,
+                department=department,
+                publication_years=selected_years,
+                article_only=article_only,
+                publication_title=publication_title,
+            )
+            if orcid
+            else None
+        )
+        if linked_rows is not None:
+            # The Researchers list counts this researcher's ORCID-linked works
+            # (researcher_works); use exactly those so the popup totals match the list,
+            # instead of a name search that picks up namesakes and misses name variants.
+            researcher_rows = linked_rows
+        elif use_metadata_profile_rows:
             researcher_rows = self._researcher_profile_rows_from_metadata(
                 researcher=researcher,
                 target_key=target_key,
@@ -1449,7 +1461,7 @@ class AnalyticsService:
                 researcher_rows,
                 allow_live=False,
             )
-            if publication_title_query
+            if publication_title_query and linked_rows is None
             else None
         )
         if openalex_metrics is not None:
@@ -1613,11 +1625,14 @@ class AnalyticsService:
             if total_open_access_known
             else 0.0
         )
-        profile_orcid = (
-            openalex_metrics.get("orcid")
-            if openalex_metrics is not None
-            else self._orcid_from_openalex_author_search(target_key, researcher)
-        )
+        if linked_rows is not None:
+            profile_orcid = orcid
+        else:
+            profile_orcid = (
+                openalex_metrics.get("orcid")
+                if openalex_metrics is not None
+                else self._orcid_from_openalex_author_search(target_key, researcher)
+            )
 
         profile = {
             "researcher": profile_display,
@@ -2088,6 +2103,73 @@ class AnalyticsService:
                     continue
             rows.append(item)
 
+        return rows
+
+    @staticmethod
+    def _normalize_profile_orcid(value: str | None) -> str | None:
+        match = re.search(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dXx])", str(value or ""))
+        return match.group(1).upper() if match else None
+
+    def _researcher_profile_rows_from_links(
+        self,
+        *,
+        orcid: str,
+        faculty: str | None,
+        department: str | None,
+        publication_years: tuple[int, ...],
+        article_only: bool,
+        publication_title: str | None = None,
+    ) -> list[dict] | None:
+        session = SessionLocal()
+        try:
+            researcher_id = session.execute(
+                select(Researcher.id).where(Researcher.orcid == orcid)
+            ).scalar()
+            if researcher_id is None:
+                return None
+            query = (
+                select(Work)
+                .join(ResearcherWork, ResearcherWork.work_id == Work.id)
+                .where(ResearcherWork.researcher_id == researcher_id)
+                .order_by(Work.publication_year.desc(), Work.id.desc())
+            )
+            clean_publication_title = " ".join(str(publication_title or "").split()).strip()
+            if clean_publication_title:
+                query = query.where(cast(Work.title, String).ilike(f"%{clean_publication_title}%"))
+            works = session.execute(query).scalars().unique().all()
+        finally:
+            session.close()
+
+        # faculty/department select the *researcher* in the list (by their own affiliation),
+        # so they don't filter this researcher's works here; years / article-only do, exactly
+        # as in _researchers_from_researcher_links_fast.
+        selected_years = set(publication_years)
+        rows: list[dict] = []
+        for work in works:
+            if selected_years and self._normalize_publication_year(work.publication_year) not in selected_years:
+                continue
+            item = {
+                "work": {
+                    "id": work.id,
+                    "title": work.title,
+                    "doi": work.doi,
+                    "journal": work.journal,
+                    "authors": self._iter_author_entries(work.authors or []),
+                    "affiliations": work.affiliations or [],
+                    "keywords": work.keywords or [],
+                    "publication_year": work.publication_year,
+                    "document_type": work.document_type,
+                    "open_access_status": work.open_access_status,
+                    "citation_count": work.citation_count,
+                    "primary_source_url": work.primary_source_url,
+                    "source_names": work.source_names or [],
+                },
+                "faculty": None,
+                "department": None,
+            }
+            if article_only and not self._is_article_work(item["work"]):
+                continue
+            rows.append(item)
         return rows
 
     def _researcher_search_term(self, researcher: str, target_key: str) -> str:
@@ -4932,24 +5014,71 @@ class AnalyticsService:
             self._save_researchers_cache_snapshot(full_list)
         return full_list if limit is None else full_list[:limit]
 
-    def _researchers_from_researcher_links_fast(self, limit: int | None) -> list[dict]:
+    def _researchers_from_researcher_links_fast(
+        self,
+        limit: int | None,
+        *,
+        faculty: str | None = None,
+        department: str | None = None,
+        publication_years: list[int] | tuple[int, ...] | None = None,
+        article_only: bool = False,
+    ) -> list[dict]:
+        """Researchers and their ORCID-linked works (researcher_works).
+
+        - faculty / department select researchers by their own faculty/department (the
+          labels shown in the list, derived from their ORCID/OpenAlex affiliations).
+        - publication_years / article_only restrict which linked works are counted; a
+          researcher with no matching works is left out of a filtered list.
+        """
+        selected_years = list(self._normalize_publication_years(publication_years))
+        work_filters = []
+        if selected_years:
+            work_filters.append(Work.publication_year.in_(selected_years))
+        if article_only:
+            document_type = func.lower(func.coalesce(Work.document_type, ""))
+            work_filters.append(
+                or_(
+                    document_type.in_(["article", "journal-article", "review", "review-article"]),
+                    document_type.like("%article%"),
+                )
+            )
+
+        query = select(
+            Researcher,
+            func.count(func.distinct(ResearcherWork.work_id)).label("publication_count"),
+            func.coalesce(func.sum(Work.citation_count), 0).label("citation_count"),
+            func.count(func.distinct(Work.journal)).label("journal_count"),
+            func.max(Work.publication_year).label("latest_year"),
+        )
+        if work_filters:
+            query = (
+                query.join(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
+                .join(Work, Work.id == ResearcherWork.work_id)
+                .where(*work_filters)
+            )
+        else:
+            query = (
+                query.outerjoin(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
+                .outerjoin(Work, Work.id == ResearcherWork.work_id)
+            )
+        query = query.group_by(Researcher.id).order_by(
+            func.count(func.distinct(ResearcherWork.work_id)).desc(), Researcher.display_name.asc()
+        )
+
         session = SessionLocal()
         try:
-            rows = session.execute(
-                select(
-                    Researcher,
-                    func.count(func.distinct(ResearcherWork.work_id)).label("publication_count"),
-                    func.coalesce(func.sum(Work.citation_count), 0).label("citation_count"),
-                    func.count(func.distinct(Work.journal)).label("journal_count"),
-                    func.max(Work.publication_year).label("latest_year"),
-                )
-                .outerjoin(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
-                .outerjoin(Work, Work.id == ResearcherWork.work_id)
-                .group_by(Researcher.id)
-                .order_by(func.count(func.distinct(ResearcherWork.work_id)).desc(), Researcher.display_name.asc())
-            ).all()
+            rows = session.execute(query).all()
         finally:
             session.close()
+
+        wanted_faculty = (
+            self._normalize_search_text(faculty) if faculty and faculty != "All faculties" else ""
+        )
+        wanted_department = (
+            self._normalize_search_text(department)
+            if department and department != "All departments"
+            else ""
+        )
 
         researchers: list[dict] = []
         for researcher, publication_count, citation_count, journal_count, latest_year in rows:
@@ -4963,19 +5092,25 @@ class AnalyticsService:
                 ).strip()
                 or researcher.orcid
             )
-            faculty, department = classify_record(
+            researcher_faculty, researcher_department = classify_record(
                 authors=[display_name],
                 affiliations=researcher.affiliations or [],
             )
-            faculty_label = self._visible_mapping_label(faculty)
-            department_label = self._visible_mapping_label(department)
+            faculty_label = self._visible_mapping_label(researcher_faculty) or self._openalex_unmapped_label
+            department_label = (
+                self._visible_mapping_label(researcher_department) or self._openalex_unmapped_label
+            )
+            if wanted_faculty and self._normalize_search_text(faculty_label) != wanted_faculty:
+                continue
+            if wanted_department and self._normalize_search_text(department_label) != wanted_department:
+                continue
             researchers.append(
                 {
                     "researcher": display_name,
                     "publication_count": int(publication_count or 0),
                     "citation_count": int(citation_count or 0),
-                    "faculties": [faculty_label] if faculty_label else [self._openalex_unmapped_label],
-                    "departments": [department_label] if department_label else [self._openalex_unmapped_label],
+                    "faculties": [faculty_label],
+                    "departments": [department_label],
                     "journal_count": int(journal_count or 0),
                     "latest_year": self._normalize_publication_year(latest_year),
                     "orcid": researcher.orcid,

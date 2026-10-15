@@ -344,6 +344,7 @@ def researcher_profile(
     publication_years: str | None = None,
     article_only: bool = False,
     publication_title: str | None = None,
+    orcid: str | None = None,
 ) -> dict:
     return analytics.researcher_profile(
         researcher=researcher,
@@ -352,6 +353,7 @@ def researcher_profile(
         publication_years=_parse_publication_years(publication_year, publication_years),
         article_only=article_only,
         publication_title=publication_title,
+        orcid=orcid,
     )
 
 

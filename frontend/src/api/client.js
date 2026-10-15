@@ -101,7 +101,13 @@ export const fetchResearchFields = async (filters = {}) =>
   getJson(buildPath("/api/research-fields", filters, { limit: 50 }));
 
 export const fetchResearcherProfile = async (researcher, filters = {}, options = {}) =>
-  getJson(buildPath("/api/researchers/profile", filters, { researcher }), options);
+  getJson(
+    buildPath("/api/researchers/profile", filters, {
+      researcher,
+      orcid: filters.orcid || undefined,
+    }),
+    options,
+  );
 
 export const articleMetadataDownloadPath = (filters = {}) =>
   buildPath("/api/publications/article-metadata/download", filters);

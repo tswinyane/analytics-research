@@ -88,6 +88,9 @@ export default function App() {
   const [error, setError] = useState("");
   const [showResearcherProfile, setShowResearcherProfile] = useState(false);
   const [selectedResearcher, setSelectedResearcher] = useState("");
+  // ORCID of the researcher row that opened the popup, so the profile uses the same
+  // ORCID-linked works as the list (a name search can match namesakes).
+  const [selectedResearcherOrcid, setSelectedResearcherOrcid] = useState("");
   const [researcherProfileLoading, setResearcherProfileLoading] = useState(false);
   const [researcherProfileError, setResearcherProfileError] = useState("");
   const [researcherProfile, setResearcherProfile] = useState(null);
@@ -376,7 +379,12 @@ export default function App() {
     },
   );
 
-  const loadResearcherProfile = async (researcher, publicationTitleQuery = "", showLoading = false) => {
+  const loadResearcherProfile = async (
+    researcher,
+    publicationTitleQuery = "",
+    showLoading = false,
+    orcid = selectedResearcherOrcid,
+  ) => {
     const requestId = researcherProfileRequestRef.current + 1;
     researcherProfileRequestRef.current = requestId;
     researcherProfileAbortRef.current?.abort();
@@ -387,6 +395,7 @@ export default function App() {
       department: selectedDepartment,
       publicationYears: selectedPublicationYears,
       publicationTitleQuery,
+      orcid,
     };
     if (showLoading) {
       setResearcherProfileLoading(true);
@@ -419,15 +428,16 @@ export default function App() {
       loadResearcherProfile(selectedResearcher, nextQuery);
     }, 450);
   };
-  const openResearcherProfile = async (researcher) => {
+  const openResearcherProfile = async (researcher, orcid = "") => {
     if (researcherProfileSearchTimerRef.current) {
       clearTimeout(researcherProfileSearchTimerRef.current);
     }
     setSelectedResearcher(researcher);
+    setSelectedResearcherOrcid(orcid || "");
     setShowResearcherProfile(true);
     setResearcherProfile(null);
     setProfilePublicationTitleQuery("");
-    await loadResearcherProfile(researcher, "", true);
+    await loadResearcherProfile(researcher, "", true, orcid || "");
   };
   const facultyPreviewRows = (dashboard?.facultyBreakdown ?? []).slice(0, 5);
   const dashboardMetricsWarming = Boolean(dashboard?.overview?.metrics_warming);
@@ -792,7 +802,7 @@ export default function App() {
                     <button
                       className="researcher-link"
                       type="button"
-                      onClick={() => openResearcherProfile(row.researcher)}
+                      onClick={() => openResearcherProfile(row.researcher, row.orcid)}
                     >
                       {row.researcher}
                     </button>
