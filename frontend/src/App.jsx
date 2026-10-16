@@ -964,6 +964,8 @@ export default function App() {
               loading={fieldsLoading}
               labelKey="field"
               valueKey="count"
+              labelHeading="Field"
+              valueHeading="Publications"
             />
             <DataTable
               title="Research field detail"

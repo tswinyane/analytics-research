@@ -8,6 +8,8 @@ export default function BarList({
   loading = false,
   headerAction = null,
   className = "",
+  labelHeading = "",
+  valueHeading = "",
 }) {
   const maxValue = rows.length ? Math.max(...rows.map((row) => row[valueKey] || 0)) : 0;
 
@@ -23,7 +25,14 @@ export default function BarList({
         ) : rows.length === 0 ? (
           <p className="empty-state">No data available yet.</p>
         ) : (
-          rows.map((row) => {
+          <>
+          {labelHeading || valueHeading ? (
+            <div className="bar-copy bar-list-heading" aria-hidden="true">
+              <span>{labelHeading}</span>
+              <span>{valueHeading}</span>
+            </div>
+          ) : null}
+          {rows.map((row) => {
             const width = maxValue ? `${(row[valueKey] / maxValue) * 100}%` : "0%";
             return (
               <div className="bar-row" key={`${title}-${row[labelKey]}`}>
@@ -36,7 +45,8 @@ export default function BarList({
                 </div>
               </div>
             );
-          })
+          })}
+          </>
         )}
       </div>
     </section>
