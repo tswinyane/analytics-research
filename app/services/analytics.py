@@ -1369,7 +1369,24 @@ class AnalyticsService:
         selected_years = self._normalize_publication_years(publication_years)
         publication_title_query = self._normalize_search_text(publication_title)
         orcid = self._normalize_profile_orcid(orcid)
-        cache_key = (researcher, faculty, department, selected_years, article_only, publication_title_query, orcid)
+        # Older frontends (and any other caller) may send only the name: resolve it to the
+        # recorded ORCID researcher so the popup still uses the same ORCID-linked works as
+        # the Researchers list.
+        if not orcid:
+            orcid = self._orcid_for_recorded_researcher_name(researcher)
+        # The link count is part of the cache key, so a harvest that adds works for this
+        # researcher (in another process, which can't clear this cache) shows up immediately.
+        link_count = self._researcher_link_count(orcid) if orcid else None
+        cache_key = (
+            researcher,
+            faculty,
+            department,
+            selected_years,
+            article_only,
+            publication_title_query,
+            orcid,
+            link_count,
+        )
         now = time.monotonic()
         cached = self._researcher_profile_cache.get(cache_key)
         if cached is not None and now < cached[0]:
@@ -2109,6 +2126,39 @@ class AnalyticsService:
     def _normalize_profile_orcid(value: str | None) -> str | None:
         match = re.search(r"(\d{4}-\d{4}-\d{4}-\d{3}[\dXx])", str(value or ""))
         return match.group(1).upper() if match else None
+
+    def _orcid_for_recorded_researcher_name(self, researcher: str | None) -> str | None:
+        name = " ".join(str(researcher or "").split()).strip()
+        if not name:
+            return None
+        session = SessionLocal()
+        try:
+            orcids = session.scalars(
+                select(Researcher.orcid)
+                .where(
+                    or_(
+                        func.lower(Researcher.display_name) == name.lower(),
+                        func.lower(Researcher.credit_name) == name.lower(),
+                    )
+                )
+                .limit(2)
+            ).all()
+        finally:
+            session.close()
+        # Only when the name is unambiguous; two recorded people with the same name keep
+        # the old name-based behaviour rather than borrowing the wrong person's works.
+        return orcids[0] if len(orcids) == 1 else None
+
+    def _researcher_link_count(self, orcid: str) -> int | None:
+        session = SessionLocal()
+        try:
+            return session.execute(
+                select(func.count(ResearcherWork.id))
+                .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
+                .where(Researcher.orcid == orcid)
+            ).scalar()
+        finally:
+            session.close()
 
     def _researcher_profile_rows_from_links(
         self,
