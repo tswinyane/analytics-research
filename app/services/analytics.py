@@ -5080,7 +5080,61 @@ class AnalyticsService:
         - publication_years / article_only restrict which linked works are counted; a
           researcher with no matching works is left out of a filtered list.
         """
-        selected_years = list(self._normalize_publication_years(publication_years))
+        selected_years = tuple(self._normalize_publication_years(publication_years))
+        all_rows = self._researcher_links_rows_cached(selected_years, bool(article_only))
+
+        wanted_faculty = (
+            self._normalize_search_text(faculty) if faculty and faculty != "All faculties" else ""
+        )
+        wanted_department = (
+            self._normalize_search_text(department)
+            if department and department != "All departments"
+            else ""
+        )
+        researchers = [
+            dict(row)
+            for row in all_rows
+            if (not wanted_faculty or row["_faculty_key"] == wanted_faculty)
+            and (not wanted_department or row["_department_key"] == wanted_department)
+        ]
+        for row in researchers:
+            row.pop("_faculty_key", None)
+            row.pop("_department_key", None)
+        self._last_researchers_cache_status = "LINKS_FAST"
+        return researchers if limit is None else researchers[:limit]
+
+    def _researcher_links_fingerprint(self) -> tuple:
+        """Cheap change detector for researchers / researcher_works (PK lookups and a count
+        over the small researchers table), so a harvest in another process is picked up."""
+        session = SessionLocal()
+        try:
+            researcher_count, researcher_updated = session.execute(
+                select(func.count(Researcher.id), func.max(Researcher.updated_at))
+            ).one()
+            max_link_id = session.execute(select(func.max(ResearcherWork.id))).scalar()
+        finally:
+            session.close()
+        return (int(researcher_count or 0), str(researcher_updated), int(max_link_id or 0))
+
+    def _researcher_links_rows_cached(self, selected_years: tuple, article_only: bool) -> list[dict]:
+        key = (selected_years, article_only)
+        now = time.monotonic()
+        fingerprint = self._researcher_links_fingerprint()
+        cache = self.__dict__.setdefault("_researcher_links_rows_cache", {})
+        cached = cache.get(key)
+        if cached is not None and cached[0] == fingerprint and now < cached[1]:
+            return cached[2]
+        started = time.monotonic()
+        rows = self._compute_researcher_links_rows(list(selected_years), article_only)
+        logging.getLogger("uvicorn.error").info(
+            "Researchers list (years=%s, article_only=%s) built in %.2fs: %s rows",
+            list(selected_years), article_only, time.monotonic() - started, len(rows),
+        )
+        # Citation counts can change without a new link, so also expire after 15 minutes.
+        cache[key] = (fingerprint, now + 900.0, rows)
+        return rows
+
+    def _compute_researcher_links_rows(self, selected_years: list[int], article_only: bool) -> list[dict]:
         work_filters = []
         if selected_years:
             work_filters.append(Work.publication_year.in_(selected_years))
@@ -5093,42 +5147,39 @@ class AnalyticsService:
                 )
             )
 
+        # Aggregate the link table by integer researcher id first, then attach researcher
+        # rows: far cheaper than grouping the wide researchers rows (JSON affiliations) over
+        # every researcher x work join row.
+        aggregate = (
+            select(
+                ResearcherWork.researcher_id.label("researcher_id"),
+                func.count(func.distinct(ResearcherWork.work_id)).label("publication_count"),
+                func.coalesce(func.sum(Work.citation_count), 0).label("citation_count"),
+                func.count(func.distinct(Work.journal)).label("journal_count"),
+                func.max(Work.publication_year).label("latest_year"),
+            )
+            .join(Work, Work.id == ResearcherWork.work_id)
+            .where(*work_filters)
+            .group_by(ResearcherWork.researcher_id)
+            .subquery()
+        )
         query = select(
             Researcher,
-            func.count(func.distinct(ResearcherWork.work_id)).label("publication_count"),
-            func.coalesce(func.sum(Work.citation_count), 0).label("citation_count"),
-            func.count(func.distinct(Work.journal)).label("journal_count"),
-            func.max(Work.publication_year).label("latest_year"),
+            func.coalesce(aggregate.c.publication_count, 0),
+            func.coalesce(aggregate.c.citation_count, 0),
+            func.coalesce(aggregate.c.journal_count, 0),
+            aggregate.c.latest_year,
         )
         if work_filters:
-            query = (
-                query.join(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
-                .join(Work, Work.id == ResearcherWork.work_id)
-                .where(*work_filters)
-            )
+            query = query.join(aggregate, aggregate.c.researcher_id == Researcher.id)
         else:
-            query = (
-                query.outerjoin(ResearcherWork, ResearcherWork.researcher_id == Researcher.id)
-                .outerjoin(Work, Work.id == ResearcherWork.work_id)
-            )
-        query = query.group_by(Researcher.id).order_by(
-            func.count(func.distinct(ResearcherWork.work_id)).desc(), Researcher.display_name.asc()
-        )
+            query = query.outerjoin(aggregate, aggregate.c.researcher_id == Researcher.id)
 
         session = SessionLocal()
         try:
             rows = session.execute(query).all()
         finally:
             session.close()
-
-        wanted_faculty = (
-            self._normalize_search_text(faculty) if faculty and faculty != "All faculties" else ""
-        )
-        wanted_department = (
-            self._normalize_search_text(department)
-            if department and department != "All departments"
-            else ""
-        )
 
         researchers: list[dict] = []
         for researcher, publication_count, citation_count, journal_count, latest_year in rows:
@@ -5150,10 +5201,6 @@ class AnalyticsService:
             department_label = (
                 self._visible_mapping_label(researcher_department) or self._openalex_unmapped_label
             )
-            if wanted_faculty and self._normalize_search_text(faculty_label) != wanted_faculty:
-                continue
-            if wanted_department and self._normalize_search_text(department_label) != wanted_department:
-                continue
             researchers.append(
                 {
                     "researcher": display_name,
@@ -5165,6 +5212,8 @@ class AnalyticsService:
                     "latest_year": self._normalize_publication_year(latest_year),
                     "orcid": researcher.orcid,
                     "openalex_author_id": researcher.openalex_author_id,
+                    "_faculty_key": self._normalize_search_text(faculty_label),
+                    "_department_key": self._normalize_search_text(department_label),
                 }
             )
         researchers.sort(
@@ -5174,8 +5223,7 @@ class AnalyticsService:
                 self._researcher_sort_name(item.get("researcher")),
             )
         )
-        self._last_researchers_cache_status = "LINKS_FAST"
-        return researchers if limit is None else researchers[:limit]
+        return researchers
 
     def _researchers_from_source_records_fast(
         self,
