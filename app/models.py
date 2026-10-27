@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import JSON, BigInteger, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -127,6 +127,11 @@ class Researcher(Base):
     orcid_works_last_modified: Mapped[int | None] = mapped_column(BigInteger)
     orcid_harvested_at: Mapped[datetime | None] = mapped_column(DateTime)
     openalex_harvested_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Is the researcher at UP now? Decides whether all their works count or only the
+    # UP-affiliated ones (see app/services/affiliation.py). Source: openalex | local | manual.
+    currently_at_institution: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
+    current_affiliation_source: Mapped[str | None] = mapped_column(String(20))
+    current_affiliation_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -150,6 +155,9 @@ class ResearcherWork(Base):
     researcher_id: Mapped[int] = mapped_column(ForeignKey("researchers.id"), nullable=False, index=True)
     work_id: Mapped[int] = mapped_column(ForeignKey("works.id", ondelete="CASCADE"), nullable=False, index=True)
     linked_via: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Was the researcher at the University of Pretoria on this work? NULL = not evaluated
+    # yet (see app/services/affiliation.py). Only True/NULL links count in researcher totals.
+    at_institution: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     researcher: Mapped[Researcher] = relationship(back_populates="work_links")

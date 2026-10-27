@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import case, or_, select, text, update
 from sqlalchemy.exc import OperationalError
@@ -23,6 +23,11 @@ from app.models import (
     Work,
 )
 from app.schemas import HarmonizedPublication
+from app.services.affiliation import (
+    ensure_researcher_work_affiliation_column,
+    refresh_current_status,
+    refresh_link_affiliations,
+)
 from app.services.author_names import (
     canonicalize_author_names,
     standardize_openalex_authors,
@@ -107,6 +112,19 @@ class IngestionPipeline:
                 )
             else:
                 summary[source_name] = self._ingest_single_source(source_name, batch_limit, article_only=article_only)
+        if {"openalex", "orcid"} & set(selected_sources):
+            # New researchers, and anyone not re-checked for 30 days: are they at UP now?
+            session = SessionLocal()
+            try:
+                summary["current_affiliation"] = refresh_current_status(
+                    session, checked_before=datetime.utcnow() - timedelta(days=30)
+                )
+                logger.info("Current UP affiliation check: %s", summary["current_affiliation"])
+            except Exception:
+                logger.exception("Current UP affiliation check failed")
+                session.rollback()
+            finally:
+                session.close()
         self._clear_analytics_cache()
         return summary
 
@@ -114,6 +132,7 @@ class IngestionPipeline:
         # The API and scheduler do not always call init_db(); create the new tables on demand.
         Researcher.__table__.create(bind=engine, checkfirst=True)
         ResearcherWork.__table__.create(bind=engine, checkfirst=True)
+        ensure_researcher_work_affiliation_column(engine)
 
     def _reset_harvest_states(self, source_names: list[str]) -> None:
         session = SessionLocal()
@@ -494,6 +513,9 @@ class IngestionPipeline:
             created += 1
         if created:
             session.flush()
+        # Mark which of these links are UP-affiliated (new links, and existing ones whose
+        # works may just have gained an OpenAlex/DSpace record).
+        refresh_link_affiliations(session, researcher_id, list(wanted))
         return created
 
     # ------------------------------------------------------------------ #

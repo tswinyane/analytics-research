@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import SessionLocal
 from app.models import AuthorAlias, HarvestRun, Researcher, ResearcherWork, SourceRecord, Work
+from app.services.affiliation import counted_link_condition, ensure_researcher_work_affiliation_column
 from app.services.faculties import (
     DEPARTMENT_RULES,
     classify_work,
@@ -1441,8 +1442,15 @@ class AnalyticsService:
                 publication_title=publication_title,
             )
         raw_researcher_rows = researcher_rows
-        researcher_rows = self._cluster_researcher_profile_rows(researcher_rows)
+        # Totals first, from the untouched rows (clustering merges rows in place).
         listing_summary = self._researcher_profile_summary_from_rows(raw_researcher_rows)
+        if linked_rows is None:
+            # Name-search rows can hold the same paper several times; cluster a copy.
+            # ORCID-linked rows are already distinct canonical works, and the fuzzy title
+            # clustering would merge different papers with similar titles, so skip it.
+            researcher_rows = self._cluster_researcher_profile_rows(
+                [{**item, "work": dict(item["work"])} for item in researcher_rows]
+            )
         profile_display = (
             (listing_summary.get("researcher") or "").strip()
             if listing_summary is not None
@@ -2155,7 +2163,7 @@ class AnalyticsService:
             return session.execute(
                 select(func.count(ResearcherWork.id))
                 .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
-                .where(Researcher.orcid == orcid)
+                .where(Researcher.orcid == orcid, counted_link_condition())
             ).scalar()
         finally:
             session.close()
@@ -2180,7 +2188,8 @@ class AnalyticsService:
             query = (
                 select(Work)
                 .join(ResearcherWork, ResearcherWork.work_id == Work.id)
-                .where(ResearcherWork.researcher_id == researcher_id)
+                .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
+                .where(ResearcherWork.researcher_id == researcher_id, counted_link_condition())
                 .order_by(Work.publication_year.desc(), Work.id.desc())
             )
             clean_publication_title = " ".join(str(publication_title or "").split()).strip()
@@ -5117,6 +5126,7 @@ class AnalyticsService:
         return (int(researcher_count or 0), str(researcher_updated), int(max_link_id or 0))
 
     def _researcher_links_rows_cached(self, selected_years: tuple, article_only: bool) -> list[dict]:
+        ensure_researcher_work_affiliation_column(SessionLocal.kw["bind"])
         key = (selected_years, article_only)
         now = time.monotonic()
         fingerprint = self._researcher_links_fingerprint()
@@ -5159,7 +5169,10 @@ class AnalyticsService:
                 func.max(Work.publication_year).label("latest_year"),
             )
             .join(Work, Work.id == ResearcherWork.work_id)
-            .where(*work_filters)
+            .join(Researcher, Researcher.id == ResearcherWork.researcher_id)
+            # Current UP researchers: all works; former: only works where they were at UP
+            # (see app/services/affiliation.py).
+            .where(counted_link_condition(), *work_filters)
             .group_by(ResearcherWork.researcher_id)
             .subquery()
         )

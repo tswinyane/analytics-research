@@ -13,7 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.config import settings
 from app.connectors.openalex import OpenAlexConnector
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
+from app.services.affiliation import ensure_researcher_work_affiliation_column, refresh_current_status
 from app.models import Researcher
 from app.services.author_names import standardize_openalex_authors
 from app.services.harmonizer import is_article_document_type, normalize_publication
@@ -22,6 +23,7 @@ from app.services.pipeline import IngestionPipeline
 
 def main() -> None:
     args = _parse_args()
+    ensure_researcher_work_affiliation_column(engine)
     session = SessionLocal()
     try:
         researcher = _find_researcher(session, args)
@@ -96,7 +98,9 @@ def main() -> None:
             researcher.openalex_harvested_at = datetime.utcnow()
         session.commit()
         if researcher is not None:
+            status = refresh_current_status(session, [researcher.id])
             print(f"researcher_id={researcher.id} ({'created' if created else 'existing'}) orcid={researcher.orcid}")
+            print(f"currently_at_up={'yes' if status['current'] else ('no' if status['former'] else 'unknown')}")
 
         print(f"fetch_mode={fetch_mode}")
         print(f"records_fetched={len(fetched)}")

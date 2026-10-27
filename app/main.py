@@ -9,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import analytics, router
 from app.config import settings
-from app.database import init_db
+from app.database import engine, init_db
+from app.services.affiliation import ensure_researcher_work_affiliation_column
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ async def lifespan(_: FastAPI):
         await asyncio.to_thread(init_db)
     else:
         logger.info("Skipping database schema initialization during application startup")
+    try:
+        await asyncio.to_thread(ensure_researcher_work_affiliation_column, engine)
+    except Exception:
+        logger.exception("Could not ensure researcher_works.at_institution column")
     warmup_task = asyncio.create_task(asyncio.to_thread(_warm_dashboard_cache_safely))
     try:
         yield
