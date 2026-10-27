@@ -15,7 +15,11 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import SessionLocal
 from app.models import AuthorAlias, HarvestRun, Researcher, ResearcherWork, SourceRecord, Work
-from app.services.affiliation import counted_link_condition, ensure_researcher_work_affiliation_column
+from app.services.affiliation import (
+    canonical_institution_name,
+    counted_link_condition,
+    ensure_researcher_work_affiliation_column,
+)
 from app.services.faculties import (
     DEPARTMENT_RULES,
     classify_work,
@@ -1534,10 +1538,15 @@ class AnalyticsService:
                     continue
                 coauthor_counts[author_display] = coauthor_counts.get(author_display, 0) + 1
 
-            for affiliation in work.get("affiliations") or []:
-                clean_affiliation = (affiliation or "").strip()
-                if clean_affiliation:
-                    institution_counts[clean_affiliation] = institution_counts.get(clean_affiliation, 0) + 1
+            # One count per institution per work: UP and its units (FABI, GIBS, ...) are the
+            # same institution, and a name listed twice on a paper is still one paper.
+            work_institutions = {
+                canonical_institution_name(affiliation)
+                for affiliation in work.get("affiliations") or []
+            }
+            for institution in work_institutions:
+                if institution:
+                    institution_counts[institution] = institution_counts.get(institution, 0) + 1
 
             for keyword in work.get("keywords") or []:
                 clean_keyword = (keyword or "").strip()

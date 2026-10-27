@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import os
 import re
 
 import requests
@@ -42,6 +43,17 @@ UP_NAME_PATTERNS = (
     "univ. of pretoria",
     "university pretoria",
 )
+# Units that belong to UP but that OpenAlex (or affiliation text) may list on their own.
+# "Onderstepoort Veterinary Institute" is the ARC's, not UP's, so it is deliberately absent.
+UP_SUBUNIT_PATTERNS = (
+    "forestry and agricultural biotechnology institute",
+    "forestry & agricultural biotechnology institute",
+    "gordon institute of business science",
+    "mammal research institute",
+    "onderstepoort veterinary academic hospital",
+)
+UP_SUBUNIT_WORDS = ("fabi", "gibs")
+UP_DISPLAY_NAME = "University of Pretoria"
 OPENALEX_AUTHORS_URL = "https://api.openalex.org/authors"
 
 _columns_checked = False
@@ -99,17 +111,43 @@ def _short_id(value) -> str:
     return str(value or "").rstrip("/").rsplit("/", 1)[-1].upper()
 
 
+def up_institution_ids() -> set[str]:
+    """UP's OpenAlex id plus any extra ids for UP units (OPENALEX_UP_INSTITUTION_IDS,
+    comma-separated, e.g. FABI's own OpenAlex institution id)."""
+    ids = {str(settings.openalex_institution_id or "").strip().upper()}
+    ids.update(_short_id(value) for value in os.getenv("OPENALEX_UP_INSTITUTION_IDS", "").split(","))
+    return {value for value in ids if value}
+
+
+def is_up_name(value: str | None) -> bool:
+    """Does this institution name / affiliation text refer to UP or one of its units?"""
+    lowered = re.sub(r"\s+", " ", str(value or "").lower())
+    if not lowered:
+        return False
+    if any(pattern in lowered for pattern in UP_NAME_PATTERNS + UP_SUBUNIT_PATTERNS):
+        return True
+    return any(re.search(rf"(?<![a-z]){word}(?![a-z])", lowered) for word in UP_SUBUNIT_WORDS)
+
+
+def canonical_institution_name(value: str | None) -> str:
+    """UP and its units (FABI, GIBS, ...) become one institution: "University of Pretoria"."""
+    clean = " ".join(str(value or "").split())
+    return UP_DISPLAY_NAME if is_up_name(clean) else clean
+
+
 def _is_up_institution(institution: dict) -> bool:
-    wanted = str(settings.openalex_institution_id or "").strip().upper()
-    return bool(wanted) and _short_id((institution or {}).get("id")) == wanted
+    institution = institution or {}
+    wanted = up_institution_ids()
+    if _short_id(institution.get("id")) in wanted:
+        return True
+    # OpenAlex lists parent institutions in `lineage` (e.g. a UP institute -> UP).
+    if any(_short_id(parent) in wanted for parent in institution.get("lineage") or []):
+        return True
+    return is_up_name(institution.get("display_name"))
 
 
 def _mentions_up(values) -> bool:
-    for value in values or []:
-        lowered = re.sub(r"\s+", " ", str(value or "").lower())
-        if any(pattern in lowered for pattern in UP_NAME_PATTERNS):
-            return True
-    return False
+    return any(is_up_name(value) for value in values or [])
 
 
 def _authorship_evidence(orcid, openalex_author_id, records) -> bool | None:
