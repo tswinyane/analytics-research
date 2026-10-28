@@ -1597,8 +1597,13 @@ class AnalyticsService:
                 oa_status = (row.get("open_access_status") or "unknown").strip().lower()
                 open_access_counts[oa_status] = open_access_counts.get(oa_status, 0) + 1
 
+        # Most recent first (undated last); within a year, most cited first. The popup shows
+        # the 25 most recent publications.
         publication_rows.sort(
-            key=lambda row: (row["citations"], row["year"] if row["year"] is not None else -1),
+            key=lambda row: (
+                self._normalize_publication_year(row.get("year")) or -1,
+                row.get("citations") or 0,
+            ),
             reverse=True,
         )
         visible_publication_rows = publication_rows[:25]
