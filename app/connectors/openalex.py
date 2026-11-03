@@ -450,6 +450,7 @@ class OpenAlexConnector(BaseConnector):
             "display_name": item.get("display_name"),
             "publication_year": item.get("publication_year"),
             "publication_date": item.get("publication_date"),
+            "created_date": item.get("created_date"),
             "type": item.get("type"),
             "language": item.get("language"),
             "cited_by_count": item.get("cited_by_count"),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import hashlib
 import re
 
@@ -44,7 +45,33 @@ def normalize_publication(publication: HarmonizedPublication) -> HarmonizedPubli
     publication.open_access_status = _clean_text(
         str(publication.open_access_status) if publication.open_access_status is not None else None
     )
+    publication.publication_year, publication.publication_date = correct_future_publication_date(
+        publication.publication_year,
+        publication.publication_date,
+        (publication.raw_payload or {}).get("created_date") if isinstance(publication.raw_payload, dict) else None,
+    )
     return publication
+
+
+def correct_future_publication_date(year, publication_date, created_date=None, today: date | None = None):
+    """Journals often assign online-first articles to a future issue (e.g. the 2027
+    volume), and OpenAlex/ORCID then report that future year. A work can't have been
+    published after today, so use the year it first appeared (OpenAlex created_date) or,
+    failing that, the current year. Returns (year, publication_date)."""
+    today = today or date.today()
+    try:
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year = None
+    if publication_date is not None and publication_date > today:
+        publication_date = None
+    if year is None or year <= today.year:
+        return year, publication_date
+    created_year = None
+    match = re.match(r"(\d{4})", str(created_date or ""))
+    if match and int(match.group(1)) <= today.year:
+        created_year = int(match.group(1))
+    return created_year or today.year, publication_date
 
 
 def build_dedupe_key(publication: HarmonizedPublication) -> str:
@@ -63,6 +90,14 @@ def merge_publication_into_work(work: Work, publication: HarmonizedPublication) 
     work.abstract = _prefer_longer(work.abstract, publication.abstract)
     work.doi = work.doi or publication.doi
     work.publication_year = work.publication_year or publication.publication_year
+    if (
+        work.publication_year
+        and work.publication_year > date.today().year
+        and publication.publication_year
+        and publication.publication_year <= date.today().year
+    ):
+        # A future year stored earlier gives way to a plausible one from another source.
+        work.publication_year = publication.publication_year
     work.publication_date = work.publication_date or publication.publication_date
     work.journal = work.journal or publication.journal
     work.document_type = work.document_type or publication.document_type

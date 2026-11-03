@@ -130,7 +130,8 @@ class AnalyticsService:
         # Bumped from 7 -> 8: OpenAlex-only rows include ORCID-linked researcher
         # affiliations in their faculty/department classification haystack.
         # Bumped from 8 -> 9: faculty/department matcher rewritten (tiered evidence).
-        self._dashboard_rows_cache_snapshot_version = 9
+        # Bumped from 9 -> 10: publication links prefer DOI over ORCID/OpenAlex record URLs.
+        self._dashboard_rows_cache_snapshot_version = 10
         self._researchers_cache_file = Path("logs/researchers_cache.json")
         # Bumped from 9 -> 10: discard stale partial snapshots that only contained a small
         # historical subset of researchers, which broke the Researchers page top ranking.
@@ -6997,18 +6998,43 @@ class AnalyticsService:
             return None
 
     def _publication_url(self, work: Work | dict) -> str | None:
-        source_url = self._work_value(work, "primary_source_url")
-        valid_source_url = self._first_url([source_url])
-        if valid_source_url:
-            return valid_source_url
+        """Best working link for a publication: repository handle, then DOI, then the
+        source page. ORCID per-work URLs (orcid.org/<id>/work/<put-code>) don't exist on
+        orcid.org and gave 404s, so they are only used as a link to the ORCID profile."""
+        source_url = self._first_url([self._work_value(work, "primary_source_url")])
+        return self._best_publication_url(work, source_url)
 
-        doi = self._work_value(work, "doi")
-        if doi:
-            return f"https://doi.org/{doi}"
+    def _doi_url(self, work: Work | dict) -> str | None:
+        doi = str(self._work_value(work, "doi") or "").strip()
+        doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:)", "", doi, flags=re.IGNORECASE)
+        return f"https://doi.org/{doi}" if doi else None
 
-        return None
+    def _public_url(self, url: str | None) -> str | None:
+        """Rewrite API/record URLs into pages a browser can open."""
+        if not url:
+            return None
+        text = str(url).strip()
+        openalex = re.match(r"https?://(?:api\.)?openalex\.org/(?:works/)?(W\d+)", text, re.IGNORECASE)
+        if openalex:
+            return f"https://openalex.org/works/{openalex.group(1).upper()}"
+        if re.match(r"https?://(?:pub\.|api\.)?orcid\.org/", text, re.IGNORECASE):
+            orcid = re.search(r"\d{4}-\d{4}-\d{4}-\d{3}[\dXx]", text)
+            return f"https://orcid.org/{orcid.group(0).upper()}" if orcid else None
+        return text
+
+    def _best_publication_url(self, work: Work | dict, candidate: str | None) -> str | None:
+        lowered = str(candidate or "").lower()
+        if "hdl.handle.net/" in lowered or "repository.up.ac.za/" in lowered:
+            return candidate  # UP repository record
+        doi_url = self._doi_url(work)
+        if doi_url:
+            return doi_url
+        return self._public_url(candidate)
 
     def _profile_publication_uri(self, work: Work | dict) -> str | None:
+        return self._best_publication_url(work, self._profile_publication_uri_raw(work))
+
+    def _profile_publication_uri_raw(self, work: Work | dict) -> str | None:
         existing_uri = self._first_url(
             [
                 self._work_value(work, "uri"),
@@ -7035,9 +7061,6 @@ class AnalyticsService:
             if uri:
                 return uri
 
-        doi = self._work_value(work, "doi")
-        if doi:
-            return f"https://doi.org/{doi}"
         return self._publication_url(work)
 
     def _article_metadata_uri_for_work(self, work: Work | dict) -> str | None:
@@ -7148,6 +7171,9 @@ class AnalyticsService:
                 self._profile_publication_uri_cache[work_id] = uri
                 for work in grouped_works:
                     result[id(work)] = uri
+        # Same preference everywhere: repository handle, DOI, then a browsable source page.
+        for work in works:
+            result[id(work)] = self._best_publication_url(work, result.get(id(work)))
         return result
 
     def _profile_publication_uri_from_grouped_source_records(
