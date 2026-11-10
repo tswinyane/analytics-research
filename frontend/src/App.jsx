@@ -49,6 +49,18 @@ const pathForPage = (pageId) => (pageId === "dashboard" ? "/" : `/${pageId}`);
 
 const PROFILE_PUBLICATIONS_PAGE_SIZE = 5;
 
+// First letter (A-Z) of a title, skipping leading quotes/brackets and accents. Titles that
+// start with a number (or another script) have no letter and only appear under "All".
+const titleInitial = (title) => {
+  const first = String(title ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/^[^A-Z0-9\p{L}]+/u, "")
+    .charAt(0);
+  return /[A-Z]/.test(first) ? first : "";
+};
+
 export default function App() {
   const [dashboard, setDashboard] = useState(null);
   const [researchers, setResearchers] = useState([]);
@@ -91,6 +103,7 @@ export default function App() {
   const [showResearcherProfile, setShowResearcherProfile] = useState(false);
   const [selectedResearcher, setSelectedResearcher] = useState("");
   const [profilePublicationPage, setProfilePublicationPage] = useState(1);
+  const [profilePublicationLetter, setProfilePublicationLetter] = useState("");
   // ORCID of the researcher row that opened the popup, so the profile uses the same
   // ORCID-linked works as the list (a name search can match namesakes).
   const [selectedResearcherOrcid, setSelectedResearcherOrcid] = useState("");
@@ -441,10 +454,28 @@ export default function App() {
     setShowResearcherProfile(true);
     setResearcherProfile(null);
     setProfilePublicationTitleQuery("");
+    setProfilePublicationLetter("");
+    setProfilePublicationPage(1);
     await loadResearcherProfile(researcher, "", true, orcid || "");
   };
   const facultyPreviewRows = (dashboard?.facultyBreakdown ?? []).slice(0, 5);
   const dashboardMetricsWarming = Boolean(dashboard?.overview?.metrics_warming);
+  // Researcher popup publications: A-Z filter (by first letter of the title), 5 per page.
+  const profilePublicationsAll = researcherProfile?.publications ?? [];
+  const profilePublicationLetterCounts = profilePublicationsAll.reduce((counts, row) => {
+    const letter = titleInitial(row.title);
+    if (letter) {
+      counts[letter] = (counts[letter] ?? 0) + 1;
+    }
+    return counts;
+  }, {});
+  const profilePublications = profilePublicationLetter
+    ? profilePublicationsAll.filter((row) => titleInitial(row.title) === profilePublicationLetter)
+    : profilePublicationsAll;
+  const profilePublicationPageCount = Math.max(
+    Math.ceil(profilePublications.length / PROFILE_PUBLICATIONS_PAGE_SIZE),
+    1,
+  );
   const documentTypePreviewRows = (dashboard?.documentTypes ?? []).slice(0, 5);
   const topCitedPreviewRows = (dashboard?.topCitedPublications ?? []).slice(0, 5);
   const activeFilters = {
@@ -1279,9 +1310,36 @@ export default function App() {
                         placeholder="Search publication title"
                       />
                     </label>
+                    <div className="alphabet-filter profile-alphabet-filter" aria-label="Filter publications by first letter">
+                      <button
+                        className={`alphabet-button ${profilePublicationLetter === "" ? "active" : ""}`.trim()}
+                        type="button"
+                        onClick={() => {
+                          setProfilePublicationLetter("");
+                          setProfilePublicationPage(1);
+                        }}
+                      >
+                        All
+                      </button>
+                      {alphabetFilters.map((letter) => (
+                        <button
+                          className={`alphabet-button ${profilePublicationLetter === letter ? "active" : ""}`.trim()}
+                          type="button"
+                          key={`profile-letter-${letter}`}
+                          disabled={!profilePublicationLetterCounts[letter]}
+                          title={`${profilePublicationLetterCounts[letter] ?? 0} publication(s)`}
+                          onClick={() => {
+                            setProfilePublicationLetter(letter);
+                            setProfilePublicationPage(1);
+                          }}
+                        >
+                          {letter}
+                        </button>
+                      ))}
+                    </div>
                     <DataTable
                       title="Recent and top publications"
-                      rows={(researcherProfile.publications ?? []).slice(
+                      rows={profilePublications.slice(
                         (profilePublicationPage - 1) * PROFILE_PUBLICATIONS_PAGE_SIZE,
                         profilePublicationPage * PROFILE_PUBLICATIONS_PAGE_SIZE,
                       )}
@@ -1306,7 +1364,7 @@ export default function App() {
                         { key: "citations", label: "Citations" },
                       ]}
                     />
-                    {(researcherProfile.publications ?? []).length > PROFILE_PUBLICATIONS_PAGE_SIZE ? (
+                    {profilePublications.length > PROFILE_PUBLICATIONS_PAGE_SIZE ? (
                       <div className="pagination-row">
                         <button
                           className="secondary-button"
@@ -1318,25 +1376,15 @@ export default function App() {
                         </button>
                         <span>
                           Page {profilePublicationPage.toLocaleString()} of{" "}
-                          {Math.ceil(
-                            (researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE,
-                          ).toLocaleString()}{" "}
-                          ({(researcherProfile.publications ?? []).length.toLocaleString()} publications)
+                          {profilePublicationPageCount.toLocaleString()}{" "}
+                          ({profilePublications.length.toLocaleString()} publications)
                         </span>
                         <button
                           className="secondary-button"
                           type="button"
-                          disabled={
-                            profilePublicationPage >=
-                            Math.ceil((researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE)
-                          }
+                          disabled={profilePublicationPage >= profilePublicationPageCount}
                           onClick={() =>
-                            setProfilePublicationPage((page) =>
-                              Math.min(
-                                page + 1,
-                                Math.ceil((researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE),
-                              ),
-                            )
+                            setProfilePublicationPage((page) => Math.min(page + 1, profilePublicationPageCount))
                           }
                         >
                           Next

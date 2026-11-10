@@ -751,10 +751,19 @@ tbody tr:hover {
 }
 
 .alphabet-button.active,
-.alphabet-button:hover {
+.alphabet-button:hover:not(:disabled) {
   background: var(--primary-500);
   border-color: var(--primary-500);
   color: #ffffff;
+}
+
+.alphabet-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.profile-alphabet-filter {
+  margin: 12px 0;
 }
 
 .pagination-row {
