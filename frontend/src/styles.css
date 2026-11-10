@@ -900,6 +900,26 @@ tbody tr:hover {
   gap: 14px;
 }
 
+/* Vertical divider between the Publications and Citations over time charts, centred in
+   the gap between the two chart cards (absolutely positioned, so it takes no grid cell). */
+.profile-charts-grid {
+  position: relative;
+  column-gap: 42px;
+}
+
+.profile-charts-grid::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 50%;
+  width: 3px;
+  transform: translateX(-50%);
+  border-radius: 3px;
+  background: var(--primary-600, #00286f);
+  opacity: 0.55;
+}
+
 .modal-header {
   margin-bottom: 16px;
   padding-bottom: 12px;
@@ -1002,6 +1022,21 @@ tbody tr:hover {
   .profile-collab-grid,
   .profile-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* Charts stack on narrower screens: the divider becomes a horizontal line between them. */
+  .profile-charts-grid {
+    row-gap: 42px;
+  }
+
+  .profile-charts-grid::before {
+    top: 50%;
+    bottom: auto;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    height: 3px;
+    transform: translateY(-50%);
   }
 }
 

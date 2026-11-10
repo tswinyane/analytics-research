@@ -47,6 +47,8 @@ const pageFromPath = (pathname = window.location.pathname) => {
 };
 const pathForPage = (pageId) => (pageId === "dashboard" ? "/" : `/${pageId}`);
 
+const PROFILE_PUBLICATIONS_PAGE_SIZE = 5;
+
 export default function App() {
   const [dashboard, setDashboard] = useState(null);
   const [researchers, setResearchers] = useState([]);
@@ -88,6 +90,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [showResearcherProfile, setShowResearcherProfile] = useState(false);
   const [selectedResearcher, setSelectedResearcher] = useState("");
+  const [profilePublicationPage, setProfilePublicationPage] = useState(1);
   // ORCID of the researcher row that opened the popup, so the profile uses the same
   // ORCID-linked works as the list (a name search can match namesakes).
   const [selectedResearcherOrcid, setSelectedResearcherOrcid] = useState("");
@@ -407,6 +410,7 @@ export default function App() {
         return;
       }
       setResearcherProfile(profile);
+      setProfilePublicationPage(1);
     } catch (requestError) {
       if (requestError.name === "AbortError") {
         return;
@@ -1277,7 +1281,10 @@ export default function App() {
                     </label>
                     <DataTable
                       title="Recent and top publications"
-                      rows={researcherProfile.publications ?? []}
+                      rows={(researcherProfile.publications ?? []).slice(
+                        (profilePublicationPage - 1) * PROFILE_PUBLICATIONS_PAGE_SIZE,
+                        profilePublicationPage * PROFILE_PUBLICATIONS_PAGE_SIZE,
+                      )}
                       columns={[
                         {
                           key: "title",
@@ -1299,6 +1306,43 @@ export default function App() {
                         { key: "citations", label: "Citations" },
                       ]}
                     />
+                    {(researcherProfile.publications ?? []).length > PROFILE_PUBLICATIONS_PAGE_SIZE ? (
+                      <div className="pagination-row">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={profilePublicationPage <= 1}
+                          onClick={() => setProfilePublicationPage((page) => Math.max(page - 1, 1))}
+                        >
+                          Previous
+                        </button>
+                        <span>
+                          Page {profilePublicationPage.toLocaleString()} of{" "}
+                          {Math.ceil(
+                            (researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE,
+                          ).toLocaleString()}{" "}
+                          ({(researcherProfile.publications ?? []).length.toLocaleString()} publications)
+                        </span>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={
+                            profilePublicationPage >=
+                            Math.ceil((researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE)
+                          }
+                          onClick={() =>
+                            setProfilePublicationPage((page) =>
+                              Math.min(
+                                page + 1,
+                                Math.ceil((researcherProfile.publications ?? []).length / PROFILE_PUBLICATIONS_PAGE_SIZE),
+                              ),
+                            )
+                          }
+                        >
+                          Next
+                        </button>
+                      </div>
+                    ) : null}
                   </section>
 
                   <section className="panel">

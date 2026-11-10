@@ -1607,7 +1607,8 @@ class AnalyticsService:
             ),
             reverse=True,
         )
-        visible_publication_rows = publication_rows[:25]
+        # Every publication is returned; the popup pages through them (5 per page).
+        visible_publication_rows = publication_rows
         visible_publication_uris = self._profile_publication_uris(
             [row.get("_work") for row in visible_publication_rows if row.get("_work") is not None]
         )
@@ -1621,7 +1622,15 @@ class AnalyticsService:
             elif row.get("uri") and not row.get("url"):
                 row["url"] = row["uri"]
 
-        all_years = sorted(set(yearly_publications.keys()) | set(yearly_citations.keys()))
+        # Performance charts cover 2020 onwards, one bar per year (zero-filled).
+        chart_start_year = 2020
+        recent_years = [
+            year
+            for year in set(yearly_publications.keys()) | set(yearly_citations.keys())
+            if year >= chart_start_year
+        ]
+        chart_end_year = max([time.localtime().tm_year, *recent_years])
+        all_years = list(range(chart_start_year, chart_end_year + 1))
         publications_over_time = [{"year": y, "count": yearly_publications.get(y, 0)} for y in all_years]
         citations_over_time = [{"year": y, "count": yearly_citations.get(y, 0)} for y in all_years]
 
