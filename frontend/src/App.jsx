@@ -104,6 +104,8 @@ export default function App() {
   const [selectedResearcher, setSelectedResearcher] = useState("");
   const [profilePublicationPage, setProfilePublicationPage] = useState(1);
   const [profilePublicationLetter, setProfilePublicationLetter] = useState("");
+  // Year picked by clicking a bar on the popup's performance charts ("" = all years).
+  const [profilePublicationYear, setProfilePublicationYear] = useState("");
   // ORCID of the researcher row that opened the popup, so the profile uses the same
   // ORCID-linked works as the list (a name search can match namesakes).
   const [selectedResearcherOrcid, setSelectedResearcherOrcid] = useState("");
@@ -455,13 +457,23 @@ export default function App() {
     setResearcherProfile(null);
     setProfilePublicationTitleQuery("");
     setProfilePublicationLetter("");
+    setProfilePublicationYear("");
     setProfilePublicationPage(1);
     await loadResearcherProfile(researcher, "", true, orcid || "");
   };
   const facultyPreviewRows = (dashboard?.facultyBreakdown ?? []).slice(0, 5);
   const dashboardMetricsWarming = Boolean(dashboard?.overview?.metrics_warming);
   // Researcher popup publications: A-Z filter (by first letter of the title), 5 per page.
-  const profilePublicationsAll = researcherProfile?.publications ?? [];
+  const profilePublicationsAllYears = researcherProfile?.publications ?? [];
+  const profilePublicationsAll = profilePublicationYear
+    ? profilePublicationsAllYears.filter((row) => String(row.year) === String(profilePublicationYear))
+    : profilePublicationsAllYears;
+  const selectProfilePublicationYear = (year) => {
+    // Clicking the selected bar again shows all years.
+    setProfilePublicationYear((current) => (String(current) === String(year) ? "" : String(year)));
+    setProfilePublicationLetter("");
+    setProfilePublicationPage(1);
+  };
   const profilePublicationLetterCounts = profilePublicationsAll.reduce((counts, row) => {
     const letter = titleInitial(row.title);
     if (letter) {
@@ -1283,12 +1295,16 @@ export default function App() {
                         rows={researcherProfile.performance_overview?.publications_over_time ?? []}
                         labelKey="year"
                         valueKey="count"
+                        onSelect={selectProfilePublicationYear}
+                        selectedLabel={profilePublicationYear}
                       />
                       <ColumnChart
                         title="Citations over time (yearly citation impact)"
                         rows={researcherProfile.performance_overview?.citations_over_time ?? []}
                         labelKey="year"
                         valueKey="count"
+                        onSelect={selectProfilePublicationYear}
+                        selectedLabel={profilePublicationYear}
                       />
                     </div>
                   </section>
@@ -1310,6 +1326,21 @@ export default function App() {
                         placeholder="Search publication title"
                       />
                     </label>
+                    {profilePublicationYear ? (
+                      <div className="profile-year-filter">
+                        <span>
+                          Showing publications from <strong>{profilePublicationYear}</strong> (
+                          {profilePublicationsAll.length.toLocaleString()})
+                        </span>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => selectProfilePublicationYear(profilePublicationYear)}
+                        >
+                          Show all years
+                        </button>
+                      </div>
+                    ) : null}
                     <div className="alphabet-filter profile-alphabet-filter" aria-label="Filter publications by first letter">
                       <button
                         className={`alphabet-button ${profilePublicationLetter === "" ? "active" : ""}`.trim()}

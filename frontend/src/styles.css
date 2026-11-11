@@ -564,6 +564,55 @@ select {
   line-height: 1.1;
 }
 
+/* Clickable year bars (researcher popup): click a year to list only its publications. */
+.column-chart-interactive .column-item {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  border-radius: 10px;
+  transition: opacity 0.15s ease;
+}
+
+.column-chart-interactive .column-item:hover .column-track,
+.column-chart-interactive .column-item:focus-visible .column-track {
+  box-shadow: inset 0 0 0 2px var(--primary-400);
+}
+
+.column-chart-interactive .column-item:focus-visible {
+  outline: 2px solid var(--primary-400);
+  outline-offset: 2px;
+}
+
+.column-item.selected .column-track {
+  box-shadow: inset 0 0 0 2px var(--primary-600);
+}
+
+.column-item.selected .column-label,
+.column-item.selected .column-value {
+  color: var(--primary-600);
+  font-weight: 700;
+}
+
+.column-item.dimmed {
+  opacity: 0.4;
+}
+
+.profile-year-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 48, 135, 0.05);
+  color: var(--primary-600);
+}
+
 .pie-layout {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
